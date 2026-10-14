@@ -1,21 +1,4 @@
 #!/usr/bin/env python3
-"""Download and unpack an exported model into MODEL_DIR at startup.
-
-Environment variables
-  MODEL_URL         https URL of a .tar.gz / .tgz / .zip containing the exported
-                    model directory (config.json, weights/, tokenizer/ ...).
-  MODEL_DIR         where the model must end up (default /data/model).
-  MODEL_SHA256      optional expected SHA-256 of the archive; download is
-                    rejected on mismatch.
-  MODEL_URL_TOKEN   optional bearer token for private URLs.
-  MODEL_ALLOW_HTTP  set to 1 to allow plain http (local testing only).
-
-Behaviour
-  * If MODEL_DIR already holds a model downloaded from the same URL+hash,
-    nothing is downloaded (this is what a persistent disk is for).
-  * If MODEL_URL is unset, an existing MODEL_DIR/config.json is used as-is.
-  * The archive is extracted to a temp dir and moved into place atomically.
-"""
 import hashlib
 import os
 import shutil
@@ -55,7 +38,6 @@ def already_present():
 
 
 class _DropAuthOnCrossHostRedirect(urllib.request.HTTPRedirectHandler):
-    """Hosts like Hugging Face redirect to a CDN; never send the token there."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
@@ -108,7 +90,6 @@ def safe_extract_zip(archive, dest):
 
 
 def find_model_root(path):
-    """Archive may hold the model at its top level or inside one folder."""
     if os.path.isfile(os.path.join(path, "config.json")):
         return path
     for entry in sorted(os.listdir(path)):

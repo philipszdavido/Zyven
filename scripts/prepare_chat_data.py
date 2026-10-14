@@ -1,20 +1,4 @@
 #!/usr/bin/env python3
-"""Convert chat/instruction datasets into PyTensorForge chat JSONL (Phase 7).
-
-Output (one conversation per line, what `data.format: chat` reads):
-    OUT/train/part-0000.jsonl ...
-    OUT/val.jsonl
-        {"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
-
-Accepted input shapes (.jsonl, one record per line):
-    {"messages": [{"role": ..., "content": ...}, ...]}
-    {"conversations": [{"from": "human"|"gpt", "value": ...}, ...]}
-    {"instruction": ..., "input": ..., "output": ...}        (Alpaca / Dolly style; also "context"/"response")
-    {"prompt": ..., "response": ...}
-
-Records with no assistant reply, empty text, or exact duplicates are dropped.
-Conversations are truncated to --max-chars so a few giant ones don't dominate.
-"""
 import argparse
 import json
 import os
@@ -63,7 +47,7 @@ def to_messages(obj):
         content = text(content)
         if role and content:
             out.append({"role": role, "content": content})
-    # the template wants the conversation to end on an assistant reply
+
     while out and out[-1]["role"] != "assistant":
         out.pop()
     return out if any(m["role"] == "assistant" for m in out) else None

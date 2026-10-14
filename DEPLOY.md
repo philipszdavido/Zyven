@@ -90,3 +90,5 @@ The chat page asks for the API key, so users need a key from you. For a public s
 python scripts/download_datasets.py tinystories --out data/pretrain
 python scripts/download_datasets.py fineweb-edu  --max-docs 500000 --out data/pretrain
 python scripts/download_datasets.py smoltalk     --max-docs 500000  --out data/chat-raw
+
+This command `python cli.py train configs/chat.yaml` creates the `checkpoints-chat` folder.

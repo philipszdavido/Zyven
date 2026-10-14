@@ -1,4 +1,3 @@
-# Stage 2 for a small story-telling bot. Model section must match pretrain.yaml.
 model:
   vocab_size: 8192
   context_length: 256
@@ -13,7 +12,7 @@ data:
   tokenizer: tokenizer.json
   format: chat
   chat_template: ptf-chat
-  chat_packing: pad            # keeps each story whole (stories are capped to fit 256 tokens)
+  chat_packing: pad
   sequence_length: 256
   prefetch: 0
 training:
@@ -21,7 +20,7 @@ training:
   total_steps: 800
   micro_batch_size: 8
   gradient_accumulation_steps: 2
-  learning_rate: 0.00005       # low, so the stories learned in stage 1 are kept
+  learning_rate: 0.00005
   warmup_steps: 30
   decay: cosine
 checkpoint:
@@ -31,3 +30,5 @@ checkpoint:
 evaluation:
   interval_steps: 200
   max_batches: 25
+runtime:
+  device: mps

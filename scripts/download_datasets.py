@@ -1,20 +1,4 @@
 #!/usr/bin/env python3
-"""Download slices of public datasets from Hugging Face as JSONL.
-
-    pip install datasets
-    python scripts/download_datasets.py tinystories --max-docs 200000 --out data/pretrain
-    python scripts/download_datasets.py fineweb-edu --max-docs 100000 --out data/pretrain
-    python scripts/download_datasets.py smoltalk --max-docs 50000 --out data/chat-raw
-    python scripts/download_datasets.py dolly --out data/chat-raw
-    python scripts/download_datasets.py no_robots --out data/chat-raw
-
-Pretraining sets write {"text": ...}. Chat sets write their original fields, and
-scripts/prepare_chat_data.py converts them to the format the trainer reads.
-
-NOTE: this script needs internet access to huggingface.co and was not run in
-the sandbox where the rest of this bundle was tested. Check each dataset's
-license on its Hugging Face page before using it.
-"""
 import argparse
 import json
 import os
@@ -34,8 +18,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("name", choices=sorted(SETS))
     ap.add_argument("--out", required=True)
-    # ap.add_argument("--max-docs", type=int, default=100000)
-    ap.add_argument("--max-docs", type=int, default=None)
+    ap.add_argument("--max-docs", type=int, default=100000)
     a = ap.parse_args()
 
     try:
@@ -56,9 +39,7 @@ def main():
                 continue
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             n += 1
-
-            if a.max_docs is not None and n >= a.max_docs:
-            #if n >= a.max_docs:
+            if n >= a.max_docs:
                 break
     print(f"wrote {n} records to {path}")
 

@@ -1,21 +1,4 @@
 #!/usr/bin/env python3
-"""Turn TinyStories-style text into chat conversations for a small story-telling bot.
-
-    python scripts/stories_to_chat.py data/pretrain --out data/chat-story
-
-Input : .jsonl files with {"text": "<story>"} (what download_datasets.py writes for TinyStories).
-Output: data/chat-story/train/*.jsonl and data/chat-story/val.jsonl, one conversation per line:
-        {"messages": [{"role": "user", "content": "Tell me a story about a dog."},
-                      {"role": "assistant", "content": "<the story>"}]}
-
-The request is built from the story itself: if the opening of the story mentions a
-known subject (boy, girl, dog, cat, ...), the prompt asks for a story about that
-subject, so the model learns that the reply must match the request. Stories that
-do not mention any known subject get a generic request.
-
-Stories longer than --max-chars are skipped so every conversation fits inside the
-model's context (256 tokens in the starter config).
-"""
 import argparse
 import json
 import os
