@@ -110,6 +110,7 @@ class ChatApp {
     toast: $("toast"),
     settings: $<HTMLDialogElement>("settings"),
     confirm: $<HTMLDialogElement>("confirm"),
+    about: $<HTMLDialogElement>("about"),
   };
 
   start(): void {
@@ -122,6 +123,7 @@ class ChatApp {
     this.select(first ? first.id : this.store.create(this.settings.model).id);
 
     this.renderSuggestions();
+    if (location.hash === "#about") this.openAbout();
     this.refreshModels();
     this.setState("idle");
     if (!coarse.matches) this.els.input.focus();
@@ -136,6 +138,15 @@ class ChatApp {
     $("collapse-btn").addEventListener("click", () => this.toggleSidebar(false));
     $("open-sidebar").addEventListener("click", () => this.toggleSidebar(true));
     $("settings-btn").addEventListener("click", () => this.openSettings());
+    $("about-btn").addEventListener("click", () => this.openAbout());
+    $("about-link").addEventListener("click", () => this.openAbout());
+    $("about-close").addEventListener("click", () => e.about.close());
+    e.about.addEventListener("close", () => {
+      if (location.hash === "#about") history.replaceState(null, "", location.pathname + location.search);
+    });
+    window.addEventListener("hashchange", () => {
+      if (location.hash === "#about") this.openAbout(); else if (e.about.open) e.about.close();
+    });
     $("chat-menu-btn").addEventListener("click", (ev) => {
       ev.stopPropagation();
       if (this.current) this.openConvMenu(this.current, ev.currentTarget as HTMLElement);
@@ -196,7 +207,7 @@ class ChatApp {
       this.select(this.store.create(this.settings.model).id);
       this.toast("All chats deleted");
     });
-    for (const d of [e.settings, e.confirm]) {
+    for (const d of [e.settings, e.confirm, e.about]) {
       d.addEventListener("click", (ev) => { if (ev.target === d) d.close(); });
     }
   }
@@ -214,7 +225,7 @@ class ChatApp {
     }
     if (mod && !ev.shiftKey && key === "b") { ev.preventDefault(); this.toggleSidebar(); return; }
     if (ev.key === "Escape") {
-      if (this.els.settings.open || this.els.confirm.open) return;
+      if (this.els.settings.open || this.els.confirm.open || this.els.about.open) return;
       if (!this.els.menu.hidden) { this.closeMenu(); return; }
       if (this.isSidebarOverlayOpen()) { this.toggleSidebar(false); return; }
       if (this.state !== "idle") this.stopGeneration();
@@ -807,6 +818,16 @@ class ChatApp {
     if (this.isSidebarOverlayOpen()) this.toggleSidebar(false);
     this.els.settings.showModal();
     if (focusId) f(focusId).focus();
+  }
+
+  private openAbout(): void {
+    const d = this.els.about;
+    if (d.open) return;
+    if (this.isSidebarOverlayOpen()) this.toggleSidebar(false);
+    if (location.hash !== "#about") history.replaceState(null, "", "#about");
+    d.showModal();
+    d.querySelector<HTMLElement>(".dialog-scroll")?.scrollTo(0, 0);
+    $("about-close").focus();
   }
 
   private syncOutputs(): void {

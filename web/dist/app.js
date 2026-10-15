@@ -109,6 +109,7 @@ class ChatApp {
         toast: $("toast"),
         settings: $("settings"),
         confirm: $("confirm"),
+        about: $("about"),
     };
     start() {
         hydrateIcons();
@@ -118,6 +119,8 @@ class ChatApp {
         const first = this.store.list().find((c) => c.messages.length);
         this.select(first ? first.id : this.store.create(this.settings.model).id);
         this.renderSuggestions();
+        if (location.hash === "#about")
+            this.openAbout();
         this.refreshModels();
         this.setState("idle");
         if (!coarse.matches)
@@ -130,6 +133,19 @@ class ChatApp {
         $("collapse-btn").addEventListener("click", () => this.toggleSidebar(false));
         $("open-sidebar").addEventListener("click", () => this.toggleSidebar(true));
         $("settings-btn").addEventListener("click", () => this.openSettings());
+        $("about-btn").addEventListener("click", () => this.openAbout());
+        $("about-link").addEventListener("click", () => this.openAbout());
+        $("about-close").addEventListener("click", () => e.about.close());
+        e.about.addEventListener("close", () => {
+            if (location.hash === "#about")
+                history.replaceState(null, "", location.pathname + location.search);
+        });
+        window.addEventListener("hashchange", () => {
+            if (location.hash === "#about")
+                this.openAbout();
+            else if (e.about.open)
+                e.about.close();
+        });
         $("chat-menu-btn").addEventListener("click", (ev) => {
             ev.stopPropagation();
             if (this.current)
@@ -197,7 +213,7 @@ class ChatApp {
             this.select(this.store.create(this.settings.model).id);
             this.toast("All chats deleted");
         });
-        for (const d of [e.settings, e.confirm]) {
+        for (const d of [e.settings, e.confirm, e.about]) {
             d.addEventListener("click", (ev) => { if (ev.target === d)
                 d.close(); });
         }
@@ -223,7 +239,7 @@ class ChatApp {
             return;
         }
         if (ev.key === "Escape") {
-            if (this.els.settings.open || this.els.confirm.open)
+            if (this.els.settings.open || this.els.confirm.open || this.els.about.open)
                 return;
             if (!this.els.menu.hidden) {
                 this.closeMenu();
@@ -845,6 +861,18 @@ class ChatApp {
         this.els.settings.showModal();
         if (focusId)
             f(focusId).focus();
+    }
+    openAbout() {
+        const d = this.els.about;
+        if (d.open)
+            return;
+        if (this.isSidebarOverlayOpen())
+            this.toggleSidebar(false);
+        if (location.hash !== "#about")
+            history.replaceState(null, "", "#about");
+        d.showModal();
+        d.querySelector(".dialog-scroll")?.scrollTo(0, 0);
+        $("about-close").focus();
     }
     syncOutputs() {
         $("temp-out").textContent = Number($("set-temperature").value).toFixed(1);
