@@ -9,6 +9,7 @@ WORKDIR /app
 RUN pip install --no-cache-dir "pytensorforge==0.2.0"
 
 COPY cli.py ./
+COPY web/dist ./web/dist
 COPY serve.yaml ./serve.yaml
 COPY start.sh ./start.sh
 COPY scripts/fetch_model.py ./scripts/fetch_model.py
