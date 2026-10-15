@@ -39,11 +39,13 @@ export class ChatClient {
     apiKey;
     maxRetries;
     fetchImpl;
+    extraHeaders;
     constructor(opts = {}) {
         this.baseUrl = (opts.baseUrl ?? "").replace(/\/+$/, "");
         this.apiKey = opts.apiKey ?? "";
         this.maxRetries = opts.maxRetries ?? 3;
         this.fetchImpl = opts.fetchImpl ?? fetch.bind(globalThis);
+        this.extraHeaders = opts.extraHeaders ?? (() => ({}));
     }
     configure(opts) {
         if (opts.baseUrl !== undefined)
@@ -54,7 +56,7 @@ export class ChatClient {
             this.maxRetries = opts.maxRetries;
     }
     headers(accept, hasBody) {
-        const h = { Accept: accept === "json" ? "application/json" : "text/event-stream" };
+        const h = { ...this.extraHeaders(), Accept: accept === "json" ? "application/json" : "text/event-stream" };
         if (hasBody)
             h["Content-Type"] = "application/json";
         if (this.apiKey)

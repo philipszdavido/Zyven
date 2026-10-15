@@ -13,6 +13,10 @@ services:
         sync: false          # optional integrity check (leave empty to skip)
       - key: MODEL_DIR
         value: /data/model
+      - key: ANALYTICS_PASSWORD
+        sync: false          # you are prompted for this: password for /analytics (user name "admin")
+      - key: ANALYTICS_LOG_PROMPTS
+        value: "0"           # "1" stores what visitors type and the replies; the chat page then says so
     disk:
       name: model-data
       mountPath: /data

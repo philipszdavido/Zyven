@@ -1,3 +1,4 @@
+import { Analytics } from "./analytics.js";
 import { AbortedError, ApiError, ChatClient, ChatMessage, ModelInfo, NetworkError } from "./api.js";
 import { hydrateIcons, icon } from "./icons.js";
 import { renderMarkdown } from "./markdown.js";
@@ -69,7 +70,9 @@ function greeting(): string {
 class ChatApp {
   private store = new ConversationStore();
   private settings: Settings = loadSettings();
-  private client = new ChatClient({ baseUrl: this.settings.baseUrl, apiKey: loadApiKey() });
+  private analytics = new Analytics();
+  private client = new ChatClient({ baseUrl: this.settings.baseUrl, apiKey: loadApiKey(), extraHeaders: () => this.analytics.headers() });
+  private searchTimer = 0;
   private models: ModelInfo[] = [];
   private current: Conversation | null = null;
   private controller: AbortController | null = null;
@@ -123,7 +126,9 @@ class ChatApp {
     this.select(first ? first.id : this.store.create(this.settings.model).id);
 
     this.renderSuggestions();
-    if (location.hash === "#about") this.openAbout();
+    this.analytics.pageView();
+    this.analytics.init().then(() => this.applyPrivacyNotice());
+    if (location.hash === "#about") this.openAbout("link");
     this.refreshModels();
     this.setState("idle");
     if (!coarse.matches) this.els.input.focus();
@@ -138,14 +143,14 @@ class ChatApp {
     $("collapse-btn").addEventListener("click", () => this.toggleSidebar(false));
     $("open-sidebar").addEventListener("click", () => this.toggleSidebar(true));
     $("settings-btn").addEventListener("click", () => this.openSettings());
-    $("about-btn").addEventListener("click", () => this.openAbout());
-    $("about-link").addEventListener("click", () => this.openAbout());
+    $("about-btn").addEventListener("click", () => this.openAbout("sidebar"));
+    $("about-link").addEventListener("click", () => this.openAbout("footnote"));
     $("about-close").addEventListener("click", () => e.about.close());
     e.about.addEventListener("close", () => {
       if (location.hash === "#about") history.replaceState(null, "", location.pathname + location.search);
     });
     window.addEventListener("hashchange", () => {
-      if (location.hash === "#about") this.openAbout(); else if (e.about.open) e.about.close();
+      if (location.hash === "#about") this.openAbout("link"); else if (e.about.open) e.about.close();
     });
     $("chat-menu-btn").addEventListener("click", (ev) => {
       ev.stopPropagation();
@@ -168,7 +173,14 @@ class ChatApp {
       if (this.current) { this.current.model = e.model.value; this.store.save(); }
     });
 
-    e.search.addEventListener("input", () => { this.query = e.search.value.trim().toLowerCase(); this.renderList(); });
+    e.search.addEventListener("input", () => {
+      this.query = e.search.value.trim().toLowerCase();
+      this.renderList();
+      clearTimeout(this.searchTimer);
+      this.searchTimer = window.setTimeout(() => {
+        if (this.query) this.analytics.track("search", { chars: this.query.length, results: this.els.history.querySelectorAll(".history-item").length });
+      }, 800);
+    });
     e.search.addEventListener("keydown", (ev) => {
       if (ev.key === "Escape") { ev.stopPropagation(); e.search.value = ""; this.query = ""; this.renderList(); e.input.focus(); }
     });
@@ -253,6 +265,7 @@ class ChatApp {
 
   private toggleSidebar(open?: boolean): void {
     const app = this.els.app;
+    const wasOpen = narrow.matches ? app.classList.contains("sidebar-open") : !this.settings.sidebarCollapsed;
     if (narrow.matches) {
       const next = open ?? !app.classList.contains("sidebar-open");
       app.classList.toggle("sidebar-open", next);
@@ -263,6 +276,8 @@ class ChatApp {
       saveSettings(this.settings);
       this.applySidebar();
     }
+    const isOpen = narrow.matches ? app.classList.contains("sidebar-open") : !this.settings.sidebarCollapsed;
+    if (isOpen !== wasOpen) this.analytics.track("sidebar_toggle", { open: isOpen, mobile: narrow.matches });
   }
 
   private applyTheme(): void {
@@ -282,13 +297,16 @@ class ChatApp {
     this.setConn("pending");
     this.renderModels();
     try {
+      const t0 = performance.now();
       this.models = await this.client.listModels();
       this.setConn(this.models.length ? "ok" : "bad");
+      this.analytics.track("connected", { ms: Math.round(performance.now() - t0), models: this.models.length });
       if (!this.models.length) this.showBanner("The server has no models loaded yet.", "Retry", () => this.refreshModels());
       else this.showBanner(null);
     } catch (err) {
       this.models = [];
       this.setConn("bad");
+      this.analytics.track("connection_failed", { status: err instanceof ApiError ? err.status : 0, online: navigator.onLine });
       if (err instanceof ApiError && err.status === 401) {
         this.showBanner("This server needs an API key.", "Add key", () => this.openSettings("set-api-key"));
       } else {
@@ -328,6 +346,7 @@ class ChatApp {
     if (this.state !== "idle") this.stopGeneration();
     const cur = this.current;
     const conv = cur && cur.messages.length === 0 ? cur : this.store.create(this.els.model.value || this.settings.model);
+    this.analytics.track("chat_new", { from_empty: conv === cur });
     this.select(conv.id);
     this.els.input.focus();
   }
@@ -388,7 +407,11 @@ class ChatApp {
       const done = (save: boolean) => {
         if (this.renamingId !== conv.id) return;
         this.renamingId = null;
-        if (save && input.value.trim()) { this.store.rename(conv.id, input.value); this.updateTitle(); }
+        if (save && input.value.trim() && input.value.trim() !== conv.title) {
+          this.store.rename(conv.id, input.value);
+          this.updateTitle();
+          this.analytics.track("chat_renamed");
+        }
         this.renderList();
       };
       input.addEventListener("keydown", (ev) => {
@@ -401,7 +424,7 @@ class ChatApp {
       return li;
     }
 
-    const link = h("button", { type: "button", class: "history-link", "aria-current": active ? "page" : undefined },
+    const link = h("button", { type: "button", class: "history-link", "data-track": "Open chat", "aria-current": active ? "page" : undefined },
       h("span", { class: "history-title", text: conv.title }));
     if (this.state !== "idle" && active) link.appendChild(h("span", { class: "history-live", title: "Generating" }));
     link.addEventListener("click", () => this.select(conv.id));
@@ -410,6 +433,7 @@ class ChatApp {
       this.openConvMenu(conv, ev.currentTarget as HTMLElement);
     }, "icon-btn icon-btn-sm history-more");
     more.setAttribute("aria-haspopup", "menu");
+    more.dataset.track = "Chat options";
     more.id = `more-${conv.id}`;
     li.append(link, more);
     return li;
@@ -433,6 +457,7 @@ class ChatApp {
     if (!ok) return;
     const wasCurrent = conv.id === this.current?.id;
     if (wasCurrent && this.state !== "idle") this.stopGeneration();
+    this.analytics.track("chat_deleted", { messages: conv.messages.length });
     this.store.remove(conv.id);
     if (wasCurrent) {
       this.current = null;
@@ -530,7 +555,7 @@ class ChatApp {
         this.els.input.value = s;
         this.autosize();
         this.updateComposer();
-        if (this.connected === "ok") this.send(); else this.els.input.focus();
+        if (this.connected === "ok") this.send(s); else this.els.input.focus();
       });
       box.appendChild(b);
     }
@@ -583,7 +608,7 @@ class ChatApp {
     }
 
     const actions = h("div", { class: "turn-actions" },
-      iconButton("copy", "Copy", () => this.copy(msg.content)),
+      iconButton("copy", "Copy", () => this.copy(msg.content, "prompt")),
       this.state === "idle" ? iconButton("edit", "Edit", () => { this.editingId = msg.id; this.renderMessages(); }) : null,
     );
     wrap.append(h("div", { class: "bubble", text: msg.content }), actions);
@@ -611,7 +636,7 @@ class ChatApp {
       col.appendChild(card);
     } else if (msg.status !== "streaming") {
       const actions = h("div", { class: "turn-actions" },
-        iconButton("copy", "Copy", () => this.copy(msg.content)),
+        iconButton("copy", "Copy", () => this.copy(msg.content, "reply")),
         isLast ? iconButton("retry", "Regenerate", () => this.regenerate()) : null,
       );
       const stats = this.stats(msg);
@@ -640,7 +665,8 @@ class ChatApp {
     return parts.join(", ");
   }
 
-  private copy(text: string): void {
+  private copy(text: string, what = "message"): void {
+    this.analytics.track("copy", { what, chars: text.length });
     const ok = () => this.toast("Copied to clipboard");
     const fail = () => this.toast("Couldn't copy");
     if (navigator.clipboard?.writeText) { navigator.clipboard.writeText(text).then(ok, fail); return; }
@@ -710,7 +736,7 @@ class ChatApp {
     return out;
   }
 
-  private send(): void {
+  private send(suggestion?: string): void {
     const text = this.els.input.value.trim();
     if (!text || !this.current || this.state !== "idle") return;
     if (!this.els.model.value) {
@@ -720,6 +746,10 @@ class ChatApp {
     this.els.input.value = "";
     this.autosize();
     this.current.messages.push({ id: uid(), role: "user", content: text, status: "done", createdAt: Date.now() });
+    this.analytics.track("message_sent", {
+      chars: text.length, words: text.split(/\s+/).length, turn: this.current.messages.filter((m) => m.role === "user").length,
+      suggestion: suggestion && suggestion === text ? suggestion : undefined, model: this.els.model.value,
+    });
     this.store.touch(this.current);
     this.updateTitle();
     this.generate();
@@ -732,6 +762,7 @@ class ChatApp {
     conv.messages = conv.messages.slice(0, index + 1);
     conv.messages[index] = { ...conv.messages[index], content: text, createdAt: Date.now() };
     this.editingId = null;
+    this.analytics.track("message_edited", { chars: text.length, dropped: conv.messages.length - index - 1 });
     this.store.touch(conv);
     this.generate();
   }
@@ -742,10 +773,12 @@ class ChatApp {
     const last = conv.messages[conv.messages.length - 1];
     if (last?.role === "assistant") conv.messages.pop();
     if (!conv.messages.length || conv.messages[conv.messages.length - 1].role !== "user") return;
+    this.analytics.track("regenerate", { after: last?.status });
     this.generate();
   }
 
   private stopGeneration(): void {
+    if (this.controller && !this.controller.signal.aborted) this.analytics.track("stop", { chars_so_far: this.streamingMsg?.content.length ?? 0 });
     this.controller?.abort();
   }
 
@@ -778,6 +811,10 @@ class ChatApp {
       msg.finishReason = result.finishReason;
       msg.ttftMs = result.firstTokenMs;
       msg.durationMs = result.durationMs;
+      this.analytics.track("reply_done", {
+        tokens: result.usage?.completion_tokens, chars: result.text.length, finish: result.finishReason,
+        ttft_ms: result.firstTokenMs != null ? Math.round(result.firstTokenMs) : undefined, duration_ms: Math.round(result.durationMs),
+      });
     } catch (err) {
       if (err instanceof AbortedError) {
         msg.status = msg.content ? "stopped" : "error";
@@ -785,6 +822,10 @@ class ChatApp {
       } else {
         msg.status = "error";
         msg.error = describeError(err);
+        this.analytics.track("reply_error", {
+          status: err instanceof ApiError ? err.status : 0, code: err instanceof ApiError ? err.code ?? undefined : err instanceof NetworkError ? "network" : "unknown",
+          partial: msg.content.length > 0,
+        });
         if (err instanceof ApiError && err.status === 401) {
           this.showBanner("This server needs an API key.", "Add key", () => this.openSettings("set-api-key"));
         }
@@ -814,20 +855,30 @@ class ChatApp {
     tokens.value = String(Math.min(this.settings.maxTokens, limit));
     $<HTMLTextAreaElement>("set-system").value = this.settings.systemPrompt;
     for (const r of document.querySelectorAll<HTMLInputElement>('input[name="theme"]')) r.checked = r.value === this.settings.theme;
+    f("set-analytics").checked = !Analytics.optedOut();
     this.syncOutputs();
+    this.analytics.track("settings_open");
     if (this.isSidebarOverlayOpen()) this.toggleSidebar(false);
     this.els.settings.showModal();
     if (focusId) f(focusId).focus();
   }
 
-  private openAbout(): void {
+  private openAbout(via: string): void {
     const d = this.els.about;
     if (d.open) return;
+    this.analytics.track("about_open", { via });
     if (this.isSidebarOverlayOpen()) this.toggleSidebar(false);
     if (location.hash !== "#about") history.replaceState(null, "", "#about");
     d.showModal();
     d.querySelector<HTMLElement>(".dialog-scroll")?.scrollTo(0, 0);
     $("about-close").focus();
+  }
+
+  private applyPrivacyNotice(): void {
+    const note = this.analytics.logPrompts ? "Conversations are saved to help improve Zyven." : "";
+    $("privacy-note").textContent = note;
+    $("privacy-note").hidden = !note;
+    $("prompts-note").hidden = !this.analytics.logPrompts;
   }
 
   private syncOutputs(): void {
@@ -841,6 +892,7 @@ class ChatApp {
     const maxTokens = Math.floor(Number(f("set-max-tokens").value));
     const theme = (document.querySelector<HTMLInputElement>('input[name="theme"]:checked')?.value ?? "system") as Theme;
     const oldBase = this.settings.baseUrl;
+    const oldTheme = this.settings.theme;
     const oldKey = loadApiKey();
     this.settings = {
       ...this.settings,
@@ -855,6 +907,19 @@ class ChatApp {
     const key = f("set-api-key").value.trim();
     saveApiKey(key, this.settings.rememberKey);
     this.client.configure({ baseUrl: this.settings.baseUrl, apiKey: key });
+    const share = f("set-analytics").checked;
+    if (share === Analytics.optedOut()) {
+      if (!share) this.analytics.track("analytics_opt_out");
+      this.analytics.flush();
+      Analytics.setOptOut(!share);
+      if (!share) this.analytics.stop();
+      else { this.analytics = new Analytics(); this.analytics.init().then(() => this.applyPrivacyNotice()); }
+    }
+    if (theme !== oldTheme) this.analytics.track("theme_changed", { from: oldTheme, to: theme });
+    this.analytics.track("settings_saved", {
+      theme, temperature: this.settings.temperature, max_tokens: this.settings.maxTokens,
+      instructions: this.settings.systemPrompt.trim().length > 0, api_key: key.length > 0, custom_server: this.settings.baseUrl.length > 0,
+    });
     this.applyTheme();
     this.els.settings.close();
     if (oldBase !== this.settings.baseUrl || oldKey !== key || this.connected !== "ok") this.refreshModels();

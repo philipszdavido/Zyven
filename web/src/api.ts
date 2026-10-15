@@ -81,6 +81,7 @@ export interface ClientOptions {
   apiKey?: string;
   maxRetries?: number;
   fetchImpl?: typeof fetch;
+  extraHeaders?: () => Record<string, string>;
 }
 
 const sleep = (ms: number, signal?: AbortSignal) =>
@@ -94,12 +95,14 @@ export class ChatClient {
   private apiKey: string;
   private maxRetries: number;
   private fetchImpl: typeof fetch;
+  private extraHeaders: () => Record<string, string>;
 
   constructor(opts: ClientOptions = {}) {
     this.baseUrl = (opts.baseUrl ?? "").replace(/\/+$/, "");
     this.apiKey = opts.apiKey ?? "";
     this.maxRetries = opts.maxRetries ?? 3;
     this.fetchImpl = opts.fetchImpl ?? fetch.bind(globalThis);
+    this.extraHeaders = opts.extraHeaders ?? (() => ({}));
   }
 
   configure(opts: ClientOptions): void {
@@ -109,7 +112,7 @@ export class ChatClient {
   }
 
   private headers(accept: "json" | "stream", hasBody: boolean): Record<string, string> {
-    const h: Record<string, string> = { Accept: accept === "json" ? "application/json" : "text/event-stream" };
+    const h: Record<string, string> = { ...this.extraHeaders(), Accept: accept === "json" ? "application/json" : "text/event-stream" };
     if (hasBody) h["Content-Type"] = "application/json";
     if (this.apiKey) h["Authorization"] = `Bearer ${this.apiKey}`;
     return h;

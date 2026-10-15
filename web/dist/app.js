@@ -1,3 +1,4 @@
+import { Analytics } from "./analytics.js";
 import { AbortedError, ApiError, ChatClient, NetworkError } from "./api.js";
 import { hydrateIcons, icon } from "./icons.js";
 import { renderMarkdown } from "./markdown.js";
@@ -69,7 +70,9 @@ function greeting() {
 class ChatApp {
     store = new ConversationStore();
     settings = loadSettings();
-    client = new ChatClient({ baseUrl: this.settings.baseUrl, apiKey: loadApiKey() });
+    analytics = new Analytics();
+    client = new ChatClient({ baseUrl: this.settings.baseUrl, apiKey: loadApiKey(), extraHeaders: () => this.analytics.headers() });
+    searchTimer = 0;
     models = [];
     current = null;
     controller = null;
@@ -119,8 +122,10 @@ class ChatApp {
         const first = this.store.list().find((c) => c.messages.length);
         this.select(first ? first.id : this.store.create(this.settings.model).id);
         this.renderSuggestions();
+        this.analytics.pageView();
+        this.analytics.init().then(() => this.applyPrivacyNotice());
         if (location.hash === "#about")
-            this.openAbout();
+            this.openAbout("link");
         this.refreshModels();
         this.setState("idle");
         if (!coarse.matches)
@@ -133,8 +138,8 @@ class ChatApp {
         $("collapse-btn").addEventListener("click", () => this.toggleSidebar(false));
         $("open-sidebar").addEventListener("click", () => this.toggleSidebar(true));
         $("settings-btn").addEventListener("click", () => this.openSettings());
-        $("about-btn").addEventListener("click", () => this.openAbout());
-        $("about-link").addEventListener("click", () => this.openAbout());
+        $("about-btn").addEventListener("click", () => this.openAbout("sidebar"));
+        $("about-link").addEventListener("click", () => this.openAbout("footnote"));
         $("about-close").addEventListener("click", () => e.about.close());
         e.about.addEventListener("close", () => {
             if (location.hash === "#about")
@@ -142,7 +147,7 @@ class ChatApp {
         });
         window.addEventListener("hashchange", () => {
             if (location.hash === "#about")
-                this.openAbout();
+                this.openAbout("link");
             else if (e.about.open)
                 e.about.close();
         });
@@ -169,7 +174,15 @@ class ChatApp {
                 this.store.save();
             }
         });
-        e.search.addEventListener("input", () => { this.query = e.search.value.trim().toLowerCase(); this.renderList(); });
+        e.search.addEventListener("input", () => {
+            this.query = e.search.value.trim().toLowerCase();
+            this.renderList();
+            clearTimeout(this.searchTimer);
+            this.searchTimer = window.setTimeout(() => {
+                if (this.query)
+                    this.analytics.track("search", { chars: this.query.length, results: this.els.history.querySelectorAll(".history-item").length });
+            }, 800);
+        });
         e.search.addEventListener("keydown", (ev) => {
             if (ev.key === "Escape") {
                 ev.stopPropagation();
@@ -271,6 +284,7 @@ class ChatApp {
     }
     toggleSidebar(open) {
         const app = this.els.app;
+        const wasOpen = narrow.matches ? app.classList.contains("sidebar-open") : !this.settings.sidebarCollapsed;
         if (narrow.matches) {
             const next = open ?? !app.classList.contains("sidebar-open");
             app.classList.toggle("sidebar-open", next);
@@ -282,6 +296,9 @@ class ChatApp {
             saveSettings(this.settings);
             this.applySidebar();
         }
+        const isOpen = narrow.matches ? app.classList.contains("sidebar-open") : !this.settings.sidebarCollapsed;
+        if (isOpen !== wasOpen)
+            this.analytics.track("sidebar_toggle", { open: isOpen, mobile: narrow.matches });
     }
     applyTheme() {
         const t = this.settings.theme;
@@ -299,8 +316,10 @@ class ChatApp {
         this.setConn("pending");
         this.renderModels();
         try {
+            const t0 = performance.now();
             this.models = await this.client.listModels();
             this.setConn(this.models.length ? "ok" : "bad");
+            this.analytics.track("connected", { ms: Math.round(performance.now() - t0), models: this.models.length });
             if (!this.models.length)
                 this.showBanner("The server has no models loaded yet.", "Retry", () => this.refreshModels());
             else
@@ -309,6 +328,7 @@ class ChatApp {
         catch (err) {
             this.models = [];
             this.setConn("bad");
+            this.analytics.track("connection_failed", { status: err instanceof ApiError ? err.status : 0, online: navigator.onLine });
             if (err instanceof ApiError && err.status === 401) {
                 this.showBanner("This server needs an API key.", "Add key", () => this.openSettings("set-api-key"));
             }
@@ -348,6 +368,7 @@ class ChatApp {
             this.stopGeneration();
         const cur = this.current;
         const conv = cur && cur.messages.length === 0 ? cur : this.store.create(this.els.model.value || this.settings.model);
+        this.analytics.track("chat_new", { from_empty: conv === cur });
         this.select(conv.id);
         this.els.input.focus();
     }
@@ -405,9 +426,10 @@ class ChatApp {
                 if (this.renamingId !== conv.id)
                     return;
                 this.renamingId = null;
-                if (save && input.value.trim()) {
+                if (save && input.value.trim() && input.value.trim() !== conv.title) {
                     this.store.rename(conv.id, input.value);
                     this.updateTitle();
+                    this.analytics.track("chat_renamed");
                 }
                 this.renderList();
             };
@@ -427,7 +449,7 @@ class ChatApp {
             requestAnimationFrame(() => { input.focus(); input.select(); });
             return li;
         }
-        const link = h("button", { type: "button", class: "history-link", "aria-current": active ? "page" : undefined }, h("span", { class: "history-title", text: conv.title }));
+        const link = h("button", { type: "button", class: "history-link", "data-track": "Open chat", "aria-current": active ? "page" : undefined }, h("span", { class: "history-title", text: conv.title }));
         if (this.state !== "idle" && active)
             link.appendChild(h("span", { class: "history-live", title: "Generating" }));
         link.addEventListener("click", () => this.select(conv.id));
@@ -436,6 +458,7 @@ class ChatApp {
             this.openConvMenu(conv, ev.currentTarget);
         }, "icon-btn icon-btn-sm history-more");
         more.setAttribute("aria-haspopup", "menu");
+        more.dataset.track = "Chat options";
         more.id = `more-${conv.id}`;
         li.append(link, more);
         return li;
@@ -459,6 +482,7 @@ class ChatApp {
         const wasCurrent = conv.id === this.current?.id;
         if (wasCurrent && this.state !== "idle")
             this.stopGeneration();
+        this.analytics.track("chat_deleted", { messages: conv.messages.length });
         this.store.remove(conv.id);
         if (wasCurrent) {
             this.current = null;
@@ -563,7 +587,7 @@ class ChatApp {
                 this.autosize();
                 this.updateComposer();
                 if (this.connected === "ok")
-                    this.send();
+                    this.send(s);
                 else
                     this.els.input.focus();
             });
@@ -620,7 +644,7 @@ class ChatApp {
             requestAnimationFrame(() => { fit(); ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); });
             return wrap;
         }
-        const actions = h("div", { class: "turn-actions" }, iconButton("copy", "Copy", () => this.copy(msg.content)), this.state === "idle" ? iconButton("edit", "Edit", () => { this.editingId = msg.id; this.renderMessages(); }) : null);
+        const actions = h("div", { class: "turn-actions" }, iconButton("copy", "Copy", () => this.copy(msg.content, "prompt")), this.state === "idle" ? iconButton("edit", "Edit", () => { this.editingId = msg.id; this.renderMessages(); }) : null);
         wrap.append(h("div", { class: "bubble", text: msg.content }), actions);
         return wrap;
     }
@@ -647,7 +671,7 @@ class ChatApp {
             col.appendChild(card);
         }
         else if (msg.status !== "streaming") {
-            const actions = h("div", { class: "turn-actions" }, iconButton("copy", "Copy", () => this.copy(msg.content)), isLast ? iconButton("retry", "Regenerate", () => this.regenerate()) : null);
+            const actions = h("div", { class: "turn-actions" }, iconButton("copy", "Copy", () => this.copy(msg.content, "reply")), isLast ? iconButton("retry", "Regenerate", () => this.regenerate()) : null);
             const stats = this.stats(msg);
             if (stats)
                 actions.appendChild(iconButton("info", stats, () => this.toast(stats)));
@@ -677,7 +701,8 @@ class ChatApp {
             parts.push(`first token in ${(msg.ttftMs / 1000).toFixed(2)} s`);
         return parts.join(", ");
     }
-    copy(text) {
+    copy(text, what = "message") {
+        this.analytics.track("copy", { what, chars: text.length });
         const ok = () => this.toast("Copied to clipboard");
         const fail = () => this.toast("Couldn't copy");
         if (navigator.clipboard?.writeText) {
@@ -752,7 +777,7 @@ class ChatApp {
         }
         return out;
     }
-    send() {
+    send(suggestion) {
         const text = this.els.input.value.trim();
         if (!text || !this.current || this.state !== "idle")
             return;
@@ -763,6 +788,10 @@ class ChatApp {
         this.els.input.value = "";
         this.autosize();
         this.current.messages.push({ id: uid(), role: "user", content: text, status: "done", createdAt: Date.now() });
+        this.analytics.track("message_sent", {
+            chars: text.length, words: text.split(/\s+/).length, turn: this.current.messages.filter((m) => m.role === "user").length,
+            suggestion: suggestion && suggestion === text ? suggestion : undefined, model: this.els.model.value,
+        });
         this.store.touch(this.current);
         this.updateTitle();
         this.generate();
@@ -775,6 +804,7 @@ class ChatApp {
         conv.messages = conv.messages.slice(0, index + 1);
         conv.messages[index] = { ...conv.messages[index], content: text, createdAt: Date.now() };
         this.editingId = null;
+        this.analytics.track("message_edited", { chars: text.length, dropped: conv.messages.length - index - 1 });
         this.store.touch(conv);
         this.generate();
     }
@@ -787,9 +817,12 @@ class ChatApp {
             conv.messages.pop();
         if (!conv.messages.length || conv.messages[conv.messages.length - 1].role !== "user")
             return;
+        this.analytics.track("regenerate", { after: last?.status });
         this.generate();
     }
     stopGeneration() {
+        if (this.controller && !this.controller.signal.aborted)
+            this.analytics.track("stop", { chars_so_far: this.streamingMsg?.content.length ?? 0 });
         this.controller?.abort();
     }
     async generate() {
@@ -816,6 +849,10 @@ class ChatApp {
             msg.finishReason = result.finishReason;
             msg.ttftMs = result.firstTokenMs;
             msg.durationMs = result.durationMs;
+            this.analytics.track("reply_done", {
+                tokens: result.usage?.completion_tokens, chars: result.text.length, finish: result.finishReason,
+                ttft_ms: result.firstTokenMs != null ? Math.round(result.firstTokenMs) : undefined, duration_ms: Math.round(result.durationMs),
+            });
         }
         catch (err) {
             if (err instanceof AbortedError) {
@@ -826,6 +863,10 @@ class ChatApp {
             else {
                 msg.status = "error";
                 msg.error = describeError(err);
+                this.analytics.track("reply_error", {
+                    status: err instanceof ApiError ? err.status : 0, code: err instanceof ApiError ? err.code ?? undefined : err instanceof NetworkError ? "network" : "unknown",
+                    partial: msg.content.length > 0,
+                });
                 if (err instanceof ApiError && err.status === 401) {
                     this.showBanner("This server needs an API key.", "Add key", () => this.openSettings("set-api-key"));
                 }
@@ -855,17 +896,20 @@ class ChatApp {
         $("set-system").value = this.settings.systemPrompt;
         for (const r of document.querySelectorAll('input[name="theme"]'))
             r.checked = r.value === this.settings.theme;
+        f("set-analytics").checked = !Analytics.optedOut();
         this.syncOutputs();
+        this.analytics.track("settings_open");
         if (this.isSidebarOverlayOpen())
             this.toggleSidebar(false);
         this.els.settings.showModal();
         if (focusId)
             f(focusId).focus();
     }
-    openAbout() {
+    openAbout(via) {
         const d = this.els.about;
         if (d.open)
             return;
+        this.analytics.track("about_open", { via });
         if (this.isSidebarOverlayOpen())
             this.toggleSidebar(false);
         if (location.hash !== "#about")
@@ -873,6 +917,12 @@ class ChatApp {
         d.showModal();
         d.querySelector(".dialog-scroll")?.scrollTo(0, 0);
         $("about-close").focus();
+    }
+    applyPrivacyNotice() {
+        const note = this.analytics.logPrompts ? "Conversations are saved to help improve Zyven." : "";
+        $("privacy-note").textContent = note;
+        $("privacy-note").hidden = !note;
+        $("prompts-note").hidden = !this.analytics.logPrompts;
     }
     syncOutputs() {
         $("temp-out").textContent = Number($("set-temperature").value).toFixed(1);
@@ -884,6 +934,7 @@ class ChatApp {
         const maxTokens = Math.floor(Number(f("set-max-tokens").value));
         const theme = (document.querySelector('input[name="theme"]:checked')?.value ?? "system");
         const oldBase = this.settings.baseUrl;
+        const oldTheme = this.settings.theme;
         const oldKey = loadApiKey();
         this.settings = {
             ...this.settings,
@@ -898,6 +949,25 @@ class ChatApp {
         const key = f("set-api-key").value.trim();
         saveApiKey(key, this.settings.rememberKey);
         this.client.configure({ baseUrl: this.settings.baseUrl, apiKey: key });
+        const share = f("set-analytics").checked;
+        if (share === Analytics.optedOut()) {
+            if (!share)
+                this.analytics.track("analytics_opt_out");
+            this.analytics.flush();
+            Analytics.setOptOut(!share);
+            if (!share)
+                this.analytics.stop();
+            else {
+                this.analytics = new Analytics();
+                this.analytics.init().then(() => this.applyPrivacyNotice());
+            }
+        }
+        if (theme !== oldTheme)
+            this.analytics.track("theme_changed", { from: oldTheme, to: theme });
+        this.analytics.track("settings_saved", {
+            theme, temperature: this.settings.temperature, max_tokens: this.settings.maxTokens,
+            instructions: this.settings.systemPrompt.trim().length > 0, api_key: key.length > 0, custom_server: this.settings.baseUrl.length > 0,
+        });
         this.applyTheme();
         this.els.settings.close();
         if (oldBase !== this.settings.baseUrl || oldKey !== key || this.connected !== "ok")

@@ -571,6 +571,8 @@ button:disabled { cursor: default; }
 .check { display: flex; align-items: center; gap: 10px; font-size: 14px; margin: -4px 0 16px; cursor: pointer; }
 .check input { width: 17px; height: 17px; accent-color: var(--accent); margin: 0; }
 .shortcuts { margin: 0; }
+.privacy-help { margin: -8px 0 14px; }
+.field-group .check:last-of-type { margin-bottom: 12px; }
 kbd {
   display: inline-block; min-width: 20px; padding: 0 5px; border-radius: 5px; border: 1px solid var(--line-strong);
   border-bottom-width: 2px; font: 500 11.5px/18px var(--font-ui); color: var(--ink-2); text-align: center; background: var(--surface);
