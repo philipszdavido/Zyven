@@ -9,6 +9,8 @@ export const DEFAULT_SETTINGS = {
     maxTokens: 512,
     systemPrompt: "",
     rememberKey: false,
+    theme: "system",
+    sidebarCollapsed: false,
 };
 export function uid() {
     const bytes = new Uint8Array(12);
@@ -60,9 +62,21 @@ export class ConversationStore {
         this.conversations = this.conversations.filter((c) => c.id !== id);
         this.save(true);
     }
+    rename(id, title) {
+        const conv = this.get(id);
+        if (!conv)
+            return;
+        conv.title = title.trim().slice(0, 80) || conv.title;
+        conv.renamed = true;
+        this.save();
+    }
+    clear() {
+        this.conversations = [];
+        this.save(true);
+    }
     touch(conv) {
         conv.updatedAt = Date.now();
-        if (conv.title === "New chat") {
+        if (conv.title === "New chat" && !conv.renamed) {
             const first = conv.messages.find((m) => m.role === "user");
             if (first)
                 conv.title = first.content.trim().replace(/\s+/g, " ").slice(0, 60) || "New chat";

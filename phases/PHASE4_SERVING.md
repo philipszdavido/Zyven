@@ -46,7 +46,8 @@ Open `http://127.0.0.1:8000/` for the chat UI, or use any OpenAI client:
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key=open("api_keys.txt").read().strip())
+
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key=open("../api_keys.txt").read().strip())
 for chunk in client.chat.completions.create(
         model="my-gpt", messages=[{"role": "user", "content": "Hello"}], stream=True):
     print(chunk.choices[0].delta.content or "", end="", flush=True)

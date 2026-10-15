@@ -1,16 +1,69 @@
 import { AbortedError, ApiError, ChatClient, ChatMessage, ModelInfo, NetworkError } from "./api.js";
+import { hydrateIcons, icon } from "./icons.js";
 import { renderMarkdown } from "./markdown.js";
 import {
-  Conversation, ConversationStore, Settings, StoredMessage,
+  Conversation, ConversationStore, Settings, StoredMessage, Theme,
   loadApiKey, loadSettings, saveApiKey, saveSettings, uid,
 } from "./store.js";
 
-type GenState = "idle" | "connecting" | "streaming" | "error";
+const BRAND = "Zyven";
+const SUGGESTIONS = [
+  "Tell me a short story about a brave little fox",
+  "Write a bedtime story set on the moon",
+  "Tell a story about two friends who find a map",
+  "Make up a story about a robot learning to paint",
+];
 
-function $(id: string): HTMLElement {
+type GenState = "idle" | "connecting" | "streaming";
+
+function $<T extends HTMLElement = HTMLElement>(id: string): T {
   const node = document.getElementById(id);
   if (!node) throw new Error(`missing element #${id}`);
+  return node as T;
+}
+
+function h<K extends keyof HTMLElementTagNameMap>(
+  tag: K, props: Record<string, string | boolean | undefined> = {}, ...children: (Node | string | null | undefined)[]
+): HTMLElementTagNameMap[K] {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (v === undefined || v === false) continue;
+    if (k === "class") node.className = String(v);
+    else if (k === "text") node.textContent = String(v);
+    else node.setAttribute(k, v === true ? "" : String(v));
+  }
+  for (const ch of children) if (ch != null) node.append(ch);
   return node;
+}
+
+function iconButton(name: string, label: string, onClick: (e: MouseEvent) => void, cls = "icon-btn icon-btn-sm"): HTMLButtonElement {
+  const b = h("button", { type: "button", class: cls, "aria-label": label, title: label }, icon(name));
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+const coarse = matchMedia("(pointer: coarse)");
+const narrow = matchMedia("(max-width: 860px)");
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const darkScheme = matchMedia("(prefers-color-scheme: dark)");
+
+function dayGroup(ts: number): string {
+  const start = new Date(); start.setHours(0, 0, 0, 0);
+  const day = 86_400_000;
+  if (ts >= start.getTime()) return "Today";
+  if (ts >= start.getTime() - day) return "Yesterday";
+  if (ts >= start.getTime() - 7 * day) return "Previous 7 days";
+  if (ts >= start.getTime() - 30 * day) return "Previous 30 days";
+  return new Date(ts).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+}
+
+function greeting(): string {
+  const hr = new Date().getHours();
+  if (hr < 5) return "Up late? Let's write something";
+  if (hr < 12) return "Good morning";
+  if (hr < 18) return "Good afternoon";
+  return "Good evening";
 }
 
 class ChatApp {
@@ -24,233 +77,575 @@ class ChatApp {
   private renderQueued = false;
   private streamingNode: HTMLElement | null = null;
   private streamingMsg: StoredMessage | null = null;
-  private streamChunks = 0;
-  private streamStarted = 0;
+  private stickToBottom = true;
+  private editingId: string | null = null;
+  private renamingId: string | null = null;
+  private query = "";
+  private toastTimer = 0;
+  private connected: "pending" | "ok" | "bad" = "pending";
 
   private els = {
-    list: $("conversations"),
+    app: $("app"),
+    sidebar: $("sidebar"),
+    scrim: $("scrim"),
+    history: $("history"),
+    search: $<HTMLInputElement>("search"),
+    title: $("chat-title"),
+    thread: $("thread"),
     messages: $("messages"),
-    input: $("input") as HTMLTextAreaElement,
-    send: $("send") as HTMLButtonElement,
-    stop: $("stop") as HTMLButtonElement,
-    model: $("model") as HTMLSelectElement,
-    status: $("status-line"),
-    conn: $("conn-status"),
+    welcome: $("welcome"),
+    welcomeTitle: $("welcome-title"),
+    suggestions: $("suggestions"),
+    input: $<HTMLTextAreaElement>("input"),
+    send: $<HTMLButtonElement>("send"),
+    stop: $<HTMLButtonElement>("stop"),
+    model: $<HTMLSelectElement>("model"),
+    connDot: $("conn-dot"),
+    hint: $("composer-hint"),
     banner: $("banner"),
-    dialog: $("settings") as HTMLDialogElement,
+    bannerText: $("banner-text"),
+    bannerAction: $<HTMLButtonElement>("banner-action"),
+    jump: $<HTMLButtonElement>("jump"),
+    menu: $("menu"),
+    toast: $("toast"),
+    settings: $<HTMLDialogElement>("settings"),
+    confirm: $<HTMLDialogElement>("confirm"),
   };
 
   start(): void {
+    hydrateIcons();
+    this.applyTheme();
+    this.applySidebar();
+    this.bind();
+
+    const first = this.store.list().find((c) => c.messages.length);
+    this.select(first ? first.id : this.store.create(this.settings.model).id);
+
+    this.renderSuggestions();
+    this.refreshModels();
+    this.setState("idle");
+    if (!coarse.matches) this.els.input.focus();
+  }
+
+  // ---------- wiring ----------
+
+  private bind(): void {
+    const e = this.els;
     $("new-chat").addEventListener("click", () => this.newConversation());
-    this.els.send.addEventListener("click", () => this.send());
-    this.els.stop.addEventListener("click", () => this.stopGeneration());
-    this.els.input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
-        e.preventDefault();
+    $("new-chat-top").addEventListener("click", () => this.newConversation());
+    $("collapse-btn").addEventListener("click", () => this.toggleSidebar(false));
+    $("open-sidebar").addEventListener("click", () => this.toggleSidebar(true));
+    $("settings-btn").addEventListener("click", () => this.openSettings());
+    $("chat-menu-btn").addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (this.current) this.openConvMenu(this.current, ev.currentTarget as HTMLElement);
+    });
+    e.scrim.addEventListener("click", () => this.toggleSidebar(false));
+
+    e.send.addEventListener("click", () => this.send());
+    e.stop.addEventListener("click", () => this.stopGeneration());
+    e.input.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing && !coarse.matches) {
+        ev.preventDefault();
         this.send();
       }
     });
-    this.els.input.addEventListener("input", () => this.autosize());
-    this.els.model.addEventListener("change", () => {
-      this.settings.model = this.els.model.value;
+    e.input.addEventListener("input", () => { this.autosize(); this.updateComposer(); });
+    e.model.addEventListener("change", () => {
+      this.settings.model = e.model.value;
       saveSettings(this.settings);
-      if (this.current) { this.current.model = this.settings.model; this.store.touch(this.current); }
+      if (this.current) { this.current.model = e.model.value; this.store.save(); }
     });
-    $("settings-btn").addEventListener("click", () => this.openSettings());
-    $("settings-save").addEventListener("click", () => this.saveSettingsFromDialog());
-    $("settings-cancel").addEventListener("click", () => this.els.dialog.close());
+
+    e.search.addEventListener("input", () => { this.query = e.search.value.trim().toLowerCase(); this.renderList(); });
+    e.search.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") { ev.stopPropagation(); e.search.value = ""; this.query = ""; this.renderList(); e.input.focus(); }
+    });
+
+    e.thread.addEventListener("scroll", () => {
+      const gap = e.thread.scrollHeight - e.thread.scrollTop - e.thread.clientHeight;
+      this.stickToBottom = gap < 80;
+      e.jump.hidden = gap < 240;
+    }, { passive: true });
+    e.jump.addEventListener("click", () => this.scrollToEnd(true, true));
+
+    document.addEventListener("keydown", (ev) => this.onShortcut(ev));
+    document.addEventListener("pointerdown", (ev) => {
+      const t = ev.target as Element;
+      if (!e.menu.hidden && !e.menu.contains(t) && !t.closest?.("[aria-haspopup]")) this.closeMenu();
+    });
+    window.addEventListener("resize", () => this.closeMenu());
     window.addEventListener("online", () => { this.showBanner(null); this.refreshModels(); });
-    window.addEventListener("offline", () => this.showBanner("You are offline. Messages will fail until the connection returns."));
+    window.addEventListener("offline", () => this.showBanner("You're offline. Messages will send once you reconnect."));
     window.addEventListener("beforeunload", () => this.store.save(true));
+    narrow.addEventListener("change", () => this.applySidebar());
+    darkScheme.addEventListener("change", () => this.applyTheme());
 
-    const first = this.store.list()[0];
-    if (first) this.select(first.id); else this.newConversation();
-    this.renderList();
-    this.refreshModels();
-    this.setState("idle");
+    $("settings-close").addEventListener("click", () => e.settings.close());
+    $("settings-cancel").addEventListener("click", () => e.settings.close());
+    $("settings-save").addEventListener("click", () => this.saveSettingsFromDialog());
+    $("set-temperature").addEventListener("input", () => this.syncOutputs());
+    $("set-max-tokens").addEventListener("input", () => this.syncOutputs());
+    $("clear-all").addEventListener("click", async () => {
+      e.settings.close();
+      const ok = await this.confirm("Delete all chats?", "Every chat saved in this browser will be removed. This can't be undone.", "Delete all");
+      if (!ok) return;
+      this.stopGeneration();
+      this.store.clear();
+      this.current = null;
+      this.select(this.store.create(this.settings.model).id);
+      this.toast("All chats deleted");
+    });
+    for (const d of [e.settings, e.confirm]) {
+      d.addEventListener("click", (ev) => { if (ev.target === d) d.close(); });
+    }
   }
 
-  private showBanner(text: string | null): void {
-    this.els.banner.textContent = text ?? "";
-    this.els.banner.hidden = !text;
+  private onShortcut(ev: KeyboardEvent): void {
+    const mod = isMac ? ev.metaKey : ev.ctrlKey;
+    const key = ev.key.toLowerCase();
+    if (mod && ev.shiftKey && key === "o") { ev.preventDefault(); this.newConversation(); return; }
+    if (mod && !ev.shiftKey && key === "k") {
+      ev.preventDefault();
+      this.toggleSidebar(true);
+      this.els.search.focus();
+      this.els.search.select();
+      return;
+    }
+    if (mod && !ev.shiftKey && key === "b") { ev.preventDefault(); this.toggleSidebar(); return; }
+    if (ev.key === "Escape") {
+      if (this.els.settings.open || this.els.confirm.open) return;
+      if (!this.els.menu.hidden) { this.closeMenu(); return; }
+      if (this.isSidebarOverlayOpen()) { this.toggleSidebar(false); return; }
+      if (this.state !== "idle") this.stopGeneration();
+    }
   }
+
+  // ---------- layout ----------
+
+  private isSidebarOverlayOpen(): boolean {
+    return narrow.matches && this.els.app.classList.contains("sidebar-open");
+  }
+
+  private applySidebar(): void {
+    const app = this.els.app;
+    app.classList.remove("sidebar-open");
+    this.els.scrim.hidden = true;
+    if (narrow.matches) {
+      app.classList.remove("sidebar-collapsed");
+      this.els.sidebar.inert = true;
+    } else {
+      app.classList.toggle("sidebar-collapsed", this.settings.sidebarCollapsed);
+      this.els.sidebar.inert = this.settings.sidebarCollapsed;
+    }
+  }
+
+  private toggleSidebar(open?: boolean): void {
+    const app = this.els.app;
+    if (narrow.matches) {
+      const next = open ?? !app.classList.contains("sidebar-open");
+      app.classList.toggle("sidebar-open", next);
+      this.els.scrim.hidden = !next;
+      this.els.sidebar.inert = !next;
+    } else {
+      this.settings.sidebarCollapsed = open === undefined ? !this.settings.sidebarCollapsed : !open;
+      saveSettings(this.settings);
+      this.applySidebar();
+    }
+  }
+
+  private applyTheme(): void {
+    const t = this.settings.theme;
+    if (t === "system") delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = t;
+    const dark = t === "dark" || (t === "system" && darkScheme.matches);
+    for (const meta of document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]')) {
+      meta.content = dark ? "#17191C" : "#F7F8F8";
+      meta.removeAttribute("media");
+    }
+  }
+
+  // ---------- models / connection ----------
 
   private async refreshModels(): Promise<void> {
-    this.els.conn.textContent = "connecting…";
-    this.els.conn.className = "conn conn-pending";
+    this.setConn("pending");
+    this.renderModels();
     try {
       this.models = await this.client.listModels();
-      this.els.conn.textContent = "connected";
-      this.els.conn.className = "conn conn-ok";
-      this.showBanner(null);
+      this.setConn(this.models.length ? "ok" : "bad");
+      if (!this.models.length) this.showBanner("The server has no models loaded yet.", "Retry", () => this.refreshModels());
+      else this.showBanner(null);
     } catch (err) {
       this.models = [];
-      this.els.conn.textContent = "disconnected";
-      this.els.conn.className = "conn conn-bad";
+      this.setConn("bad");
       if (err instanceof ApiError && err.status === 401) {
-        this.showBanner("The server requires an API key. Open Settings to add one.");
+        this.showBanner("This server needs an API key.", "Add key", () => this.openSettings("set-api-key"));
       } else {
-        this.showBanner(`Cannot load models: ${(err as Error).message}`);
+        this.showBanner("Can't reach the server. If it was asleep, it can take up to a minute to wake.", "Retry", () => this.refreshModels());
       }
     }
     this.renderModels();
+    this.updateComposer();
+  }
+
+  private setConn(state: "pending" | "ok" | "bad"): void {
+    this.connected = state;
+    this.els.connDot.dataset.state = state;
+    this.els.connDot.title = state === "ok" ? "Connected" : state === "bad" ? "Not connected" : "Connecting";
   }
 
   private renderModels(): void {
     const sel = this.els.model;
     sel.replaceChildren();
-    for (const m of this.models) {
-      const opt = document.createElement("option");
-      opt.value = m.id;
-      opt.textContent = m.context_length ? `${m.id} (${m.context_length} ctx)` : m.id;
-      sel.appendChild(opt);
-    }
+    for (const m of this.models) sel.appendChild(h("option", { value: m.id, text: m.id }));
+    if (!this.models.length) sel.appendChild(h("option", { value: "", text: this.connected === "pending" ? "Connecting…" : "Offline" }));
     const wanted = this.current?.model || this.settings.model;
     if (wanted && this.models.some((m) => m.id === wanted)) sel.value = wanted;
     else if (this.models[0]) sel.value = this.models[0].id;
-    sel.disabled = this.models.length === 0;
+    sel.disabled = this.models.length <= 1;
+    sel.closest(".model-picker")?.classList.toggle("single", this.models.length <= 1);
   }
 
+  private modelLimit(): number | undefined {
+    const m = this.models.find((x) => x.id === this.els.model.value);
+    return typeof m?.max_generation_tokens === "number" ? m.max_generation_tokens : undefined;
+  }
+
+  // ---------- conversations ----------
+
   private newConversation(): void {
-    if (this.state === "streaming" || this.state === "connecting") this.stopGeneration();
-    const conv = this.store.create(this.els.model.value || this.settings.model);
+    if (this.state !== "idle") this.stopGeneration();
+    const cur = this.current;
+    const conv = cur && cur.messages.length === 0 ? cur : this.store.create(this.els.model.value || this.settings.model);
     this.select(conv.id);
-    this.renderList();
     this.els.input.focus();
   }
 
   private select(id: string): void {
-    if (this.current?.id !== id && (this.state === "streaming" || this.state === "connecting")) this.stopGeneration();
+    if (this.current?.id !== id && this.state !== "idle") this.stopGeneration();
+    const prev = this.current;
+    if (prev && prev.id !== id && prev.messages.length === 0) this.store.remove(prev.id);
     this.current = this.store.get(id) ?? null;
+    this.editingId = null;
     if (this.current?.model && this.models.some((m) => m.id === this.current!.model)) this.els.model.value = this.current.model;
     this.renderList();
-    this.renderMessages();
+    this.renderMessages(true);
+    this.updateTitle();
+    if (narrow.matches) this.toggleSidebar(false);
+  }
+
+  private updateTitle(): void {
+    const conv = this.current;
+    const started = !!conv && conv.messages.length > 0;
+    const t = started ? conv!.title : "New chat";
+    this.els.title.textContent = t;
+    document.title = started ? `${t} – ${BRAND}` : BRAND;
+    $("chat-menu-btn").hidden = !started;
   }
 
   private renderList(): void {
-    const ul = this.els.list;
-    ul.replaceChildren();
-    for (const conv of this.store.list()) {
-      const li = document.createElement("li");
-      li.className = conv.id === this.current?.id ? "conv active" : "conv";
-      const title = document.createElement("button");
-      title.type = "button";
-      title.className = "conv-title";
-      title.textContent = conv.title;
-      title.addEventListener("click", () => this.select(conv.id));
-      const del = document.createElement("button");
-      del.type = "button";
-      del.className = "conv-delete";
-      del.title = "Delete conversation";
-      del.setAttribute("aria-label", "Delete conversation");
-      del.textContent = "×";
-      del.addEventListener("click", (e) => {
-        e.stopPropagation();
-        if (!confirm(`Delete "${conv.title}"?`)) return;
-        const wasCurrent = conv.id === this.current?.id;
-        if (wasCurrent && this.state !== "idle" && this.state !== "error") this.stopGeneration();
-        this.store.remove(conv.id);
-        if (wasCurrent) {
-          const next = this.store.list()[0];
-          if (next) this.select(next.id); else this.newConversation();
-        }
+    const nav = this.els.history;
+    nav.replaceChildren();
+    const q = this.query;
+    const convs = this.store.list().filter((c) => c.messages.length > 0).filter((c) =>
+      !q || c.title.toLowerCase().includes(q) || c.messages.some((m) => m.content.toLowerCase().includes(q)));
+
+    if (!convs.length) {
+      nav.appendChild(h("p", { class: "history-empty", text: q ? "No chats match your search." : "Your chats will appear here." }));
+      return;
+    }
+
+    let group = "";
+    let list: HTMLUListElement | null = null;
+    for (const conv of convs) {
+      const g = dayGroup(conv.updatedAt);
+      if (g !== group || !list) {
+        group = g;
+        list = h("ul", { class: "history-list" });
+        nav.append(h("h2", { class: "history-group", text: g }), list);
+      }
+      list.appendChild(this.historyItem(conv));
+    }
+  }
+
+  private historyItem(conv: Conversation): HTMLLIElement {
+    const active = conv.id === this.current?.id;
+    const li = h("li", { class: active ? "history-item active" : "history-item" });
+
+    if (this.renamingId === conv.id) {
+      const input = h("input", { class: "rename-input", type: "text", value: conv.title, "aria-label": "Chat name", maxlength: "80" });
+      const done = (save: boolean) => {
+        if (this.renamingId !== conv.id) return;
+        this.renamingId = null;
+        if (save && input.value.trim()) { this.store.rename(conv.id, input.value); this.updateTitle(); }
         this.renderList();
+      };
+      input.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") { ev.preventDefault(); done(true); }
+        if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); done(false); }
       });
-      li.append(title, del);
-      ul.appendChild(li);
+      input.addEventListener("blur", () => done(true));
+      li.appendChild(input);
+      requestAnimationFrame(() => { input.focus(); input.select(); });
+      return li;
+    }
+
+    const link = h("button", { type: "button", class: "history-link", "aria-current": active ? "page" : undefined },
+      h("span", { class: "history-title", text: conv.title }));
+    if (this.state !== "idle" && active) link.appendChild(h("span", { class: "history-live", title: "Generating" }));
+    link.addEventListener("click", () => this.select(conv.id));
+    const more = iconButton("more", `Options for ${conv.title}`, (ev) => {
+      ev.stopPropagation();
+      this.openConvMenu(conv, ev.currentTarget as HTMLElement);
+    }, "icon-btn icon-btn-sm history-more");
+    more.setAttribute("aria-haspopup", "menu");
+    more.id = `more-${conv.id}`;
+    li.append(link, more);
+    return li;
+  }
+
+  private openConvMenu(conv: Conversation, anchor: HTMLElement): void {
+    this.openMenu(anchor, [
+      { label: "Rename", icon: "edit", run: () => this.startRename(conv) },
+      { label: "Delete", icon: "trash", danger: true, run: () => this.deleteConversation(conv) },
+    ]);
+  }
+
+  private startRename(conv: Conversation): void {
+    if (narrow.matches ? !this.isSidebarOverlayOpen() : this.settings.sidebarCollapsed) this.toggleSidebar(true);
+    this.renamingId = conv.id;
+    this.renderList();
+  }
+
+  private async deleteConversation(conv: Conversation): Promise<void> {
+    const ok = await this.confirm("Delete chat?", `"${conv.title}" will be permanently deleted.`, "Delete");
+    if (!ok) return;
+    const wasCurrent = conv.id === this.current?.id;
+    if (wasCurrent && this.state !== "idle") this.stopGeneration();
+    this.store.remove(conv.id);
+    if (wasCurrent) {
+      this.current = null;
+      const next = this.store.list().find((c) => c.messages.length);
+      this.select(next ? next.id : this.store.create(this.settings.model).id);
+    } else {
+      this.renderList();
+    }
+    this.toast("Chat deleted");
+  }
+
+  // ---------- menus, dialogs, toasts ----------
+
+  private openMenu(anchor: HTMLElement, items: { label: string; icon: string; danger?: boolean; run: () => void }[]): void {
+    const menu = this.els.menu;
+    if (!menu.hidden && menu.dataset.anchor === anchor.id) { this.closeMenu(); return; }
+    menu.replaceChildren();
+    for (const it of items) {
+      const b = h("button", { type: "button", role: "menuitem", class: it.danger ? "menu-item danger" : "menu-item" },
+        icon(it.icon), h("span", { text: it.label }));
+      b.addEventListener("click", () => { this.closeMenu(); it.run(); });
+      menu.appendChild(b);
+    }
+    menu.hidden = false;
+    menu.dataset.anchor = anchor.id;
+    const r = anchor.getBoundingClientRect();
+    const mw = menu.offsetWidth, mh = menu.offsetHeight;
+    let left = r.right - mw;
+    if (left < 8) left = r.left;
+    left = Math.min(left, window.innerWidth - mw - 8);
+    let top = r.bottom + 6;
+    if (top + mh > window.innerHeight - 8) top = r.top - mh - 6;
+    menu.style.left = `${Math.max(8, left)}px`;
+    menu.style.top = `${Math.max(8, top)}px`;
+    (menu.firstElementChild as HTMLElement | null)?.focus();
+    menu.onkeydown = (ev) => {
+      const btns = [...menu.querySelectorAll<HTMLButtonElement>("button")];
+      const i = btns.indexOf(document.activeElement as HTMLButtonElement);
+      if (ev.key === "ArrowDown") { ev.preventDefault(); btns[(i + 1) % btns.length].focus(); }
+      if (ev.key === "ArrowUp") { ev.preventDefault(); btns[(i - 1 + btns.length) % btns.length].focus(); }
+      if (ev.key === "Escape") { ev.preventDefault(); this.closeMenu(); anchor.focus(); }
+      if (ev.key === "Tab") this.closeMenu();
+    };
+  }
+
+  private closeMenu(): void {
+    this.els.menu.hidden = true;
+    delete this.els.menu.dataset.anchor;
+  }
+
+  private confirm(title: string, text: string, okLabel: string): Promise<boolean> {
+    const d = this.els.confirm;
+    $("confirm-title").textContent = title;
+    $("confirm-text").textContent = text;
+    const ok = $<HTMLButtonElement>("confirm-ok");
+    ok.textContent = okLabel;
+    return new Promise((resolve) => {
+      let result = false;
+      ok.onclick = () => { result = true; d.close(); };
+      $("confirm-cancel").onclick = () => d.close();
+      d.addEventListener("close", () => resolve(result), { once: true });
+      d.showModal();
+      $("confirm-cancel").focus();
+    });
+  }
+
+  private toast(text: string): void {
+    const t = this.els.toast;
+    t.textContent = text;
+    t.hidden = false;
+    t.classList.remove("show");
+    void t.offsetWidth;
+    t.classList.add("show");
+    clearTimeout(this.toastTimer);
+    this.toastTimer = window.setTimeout(() => { t.classList.remove("show"); t.hidden = true; }, 2000);
+  }
+
+  private showBanner(text: string | null, action?: string, run?: () => void): void {
+    const e = this.els;
+    e.bannerText.textContent = text ?? "";
+    e.banner.hidden = !text;
+    e.bannerAction.hidden = !action;
+    e.bannerAction.textContent = action ?? "";
+    e.bannerAction.onclick = run ? () => run() : null;
+  }
+
+  // ---------- messages ----------
+
+  private renderSuggestions(): void {
+    const box = this.els.suggestions;
+    box.replaceChildren();
+    for (const s of SUGGESTIONS) {
+      const b = h("button", { type: "button", class: "chip", text: s });
+      b.addEventListener("click", () => {
+        this.els.input.value = s;
+        this.autosize();
+        this.updateComposer();
+        if (this.connected === "ok") this.send(); else this.els.input.focus();
+      });
+      box.appendChild(b);
     }
   }
 
-  private messageNode(msg: StoredMessage, isLast: boolean): HTMLElement {
-    const wrap = document.createElement("article");
-    wrap.className = `msg msg-${msg.role} msg-${msg.status}`;
-    wrap.dataset.id = msg.id;
-
-    const role = document.createElement("div");
-    role.className = "msg-role";
-    role.textContent = msg.role === "user" ? "You" : msg.role === "assistant" ? (msg.model || "Assistant") : "System";
-
-    const body = document.createElement("div");
-    body.className = "msg-body";
-    if (msg.role === "assistant") body.appendChild(renderMarkdown(msg.content));
-    else body.textContent = msg.content;
-
-    wrap.append(role, body);
-
-    if (msg.status === "streaming" && !msg.content) {
-      const dots = document.createElement("span");
-      dots.className = "typing";
-      dots.textContent = "…";
-      body.appendChild(dots);
-    }
-
-    if (msg.role === "assistant" && msg.status !== "streaming") {
-      const meta = document.createElement("div");
-      meta.className = "msg-meta";
-      const parts: string[] = [];
-      if (msg.status === "stopped") parts.push("stopped");
-      if (msg.finishReason === "length") parts.push("reached token limit");
-      if (msg.usage) parts.push(`${msg.usage.completion_tokens} tokens`);
-      if (msg.usage && msg.durationMs && msg.ttftMs != null && msg.usage.completion_tokens > 1) {
-        const rate = (msg.usage.completion_tokens - 1) / Math.max(0.001, (msg.durationMs - msg.ttftMs) / 1000);
-        parts.push(`${rate.toFixed(1)} tok/s`);
-      }
-      if (msg.ttftMs != null) parts.push(`TTFT ${Math.round(msg.ttftMs)} ms`);
-      meta.textContent = parts.join(" · ");
-
-      if (msg.status === "error") {
-        const err = document.createElement("div");
-        err.className = "msg-error";
-        err.textContent = msg.error || "generation failed";
-        wrap.appendChild(err);
-      }
-
-      if (isLast) {
-        const actions = document.createElement("div");
-        actions.className = "msg-actions";
-        const again = document.createElement("button");
-        again.type = "button";
-        again.textContent = msg.status === "error" ? "Retry" : "Regenerate";
-        again.addEventListener("click", () => this.regenerate());
-        actions.appendChild(again);
-        if (msg.content) {
-          const copy = document.createElement("button");
-          copy.type = "button";
-          copy.textContent = "Copy";
-          copy.addEventListener("click", () => navigator.clipboard?.writeText(msg.content));
-          actions.appendChild(copy);
-        }
-        meta.appendChild(actions);
-      }
-      wrap.appendChild(meta);
-    }
-    return wrap;
-  }
-
-  private renderMessages(): void {
+  private renderMessages(forceBottom = false): void {
     const box = this.els.messages;
     box.replaceChildren();
     this.streamingNode = null;
     const msgs = this.current?.messages ?? [];
-    if (!msgs.length) {
-      const empty = document.createElement("div");
-      empty.className = "empty";
-      empty.textContent = "Start a conversation.";
-      box.appendChild(empty);
+    const empty = msgs.length === 0;
+    this.els.app.classList.toggle("is-empty", empty);
+    this.els.welcome.hidden = !empty;
+    this.els.suggestions.hidden = !empty;
+    if (empty) {
+      this.els.welcomeTitle.textContent = greeting();
+      this.els.jump.hidden = true;
       return;
     }
+    const lastIndex = msgs.length - 1;
     msgs.forEach((m, i) => {
-      const node = this.messageNode(m, i === msgs.length - 1);
+      const node = m.role === "user" ? this.userNode(m, i) : this.assistantNode(m, i === lastIndex);
       if (m === this.streamingMsg) this.streamingNode = node;
       box.appendChild(node);
     });
-    this.scrollToEnd(true);
+    this.scrollToEnd(forceBottom);
   }
 
-  private scrollToEnd(force = false): void {
-    const box = this.els.messages;
-    const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
-    if (force || nearBottom) box.scrollTop = box.scrollHeight;
+  private userNode(msg: StoredMessage, index: number): HTMLElement {
+    const wrap = h("article", { class: "turn turn-user", "data-id": msg.id, "aria-label": "You said" });
+
+    if (this.editingId === msg.id) {
+      const ta = h("textarea", { class: "edit-input", rows: "1", "aria-label": "Edit message" });
+      ta.value = msg.content;
+      const cancel = h("button", { type: "button", class: "btn", text: "Cancel" });
+      const save = h("button", { type: "button", class: "btn btn-primary", text: "Send" });
+      const close = () => { this.editingId = null; this.renderMessages(); };
+      cancel.addEventListener("click", close);
+      save.addEventListener("click", () => this.submitEdit(index, ta.value));
+      ta.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing && !coarse.matches) { ev.preventDefault(); this.submitEdit(index, ta.value); }
+        if (ev.key === "Escape") { ev.stopPropagation(); close(); }
+      });
+      const fit = () => { ta.style.height = "auto"; ta.style.height = `${Math.min(ta.scrollHeight, 320)}px`; };
+      ta.addEventListener("input", fit);
+      wrap.classList.add("is-editing");
+      wrap.append(h("div", { class: "edit-box" }, ta, h("div", { class: "edit-actions" }, cancel, save)));
+      requestAnimationFrame(() => { fit(); ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); });
+      return wrap;
+    }
+
+    const actions = h("div", { class: "turn-actions" },
+      iconButton("copy", "Copy", () => this.copy(msg.content)),
+      this.state === "idle" ? iconButton("edit", "Edit", () => { this.editingId = msg.id; this.renderMessages(); }) : null,
+    );
+    wrap.append(h("div", { class: "bubble", text: msg.content }), actions);
+    return wrap;
+  }
+
+  private assistantNode(msg: StoredMessage, isLast: boolean): HTMLElement {
+    const wrap = h("article", { class: `turn turn-assistant is-${msg.status}`, "data-id": msg.id, "aria-label": `${BRAND} said` });
+    const body = h("div", { class: "prose" });
+    if (msg.content) body.appendChild(renderMarkdown(msg.content));
+    if (msg.status === "streaming") {
+      if (msg.content) appendCaret(body); else body.appendChild(this.thinking());
+    }
+    const col = h("div", { class: "turn-body" }, body);
+    wrap.append(h("div", { class: "avatar" }, icon("mark")), col);
+
+    if (msg.status === "error") {
+      const card = h("div", { class: "error-card", role: "alert" }, icon("alert"),
+        h("span", { class: "error-text", text: msg.error || "The reply couldn't be generated." }));
+      if (isLast) {
+        const retry = h("button", { type: "button", class: "btn btn-sm" }, icon("retry"), h("span", { text: "Try again" }));
+        retry.addEventListener("click", () => this.regenerate());
+        card.appendChild(retry);
+      }
+      col.appendChild(card);
+    } else if (msg.status !== "streaming") {
+      const actions = h("div", { class: "turn-actions" },
+        iconButton("copy", "Copy", () => this.copy(msg.content)),
+        isLast ? iconButton("retry", "Regenerate", () => this.regenerate()) : null,
+      );
+      const stats = this.stats(msg);
+      if (stats) actions.appendChild(iconButton("info", stats, () => this.toast(stats)));
+      const notes: string[] = [];
+      if (msg.status === "stopped") notes.push("Stopped");
+      if (msg.finishReason === "length") notes.push("Reached the length limit");
+      if (notes.length) actions.appendChild(h("span", { class: "turn-note", text: notes.join(". ") }));
+      col.appendChild(actions);
+    }
+    return wrap;
+  }
+
+  private thinking(): HTMLElement {
+    return h("span", { class: "thinking", role: "status", "aria-label": "Generating" }, h("i"), h("i"), h("i"));
+  }
+
+  private stats(msg: StoredMessage): string {
+    const parts: string[] = [];
+    if (msg.usage) parts.push(`${msg.usage.completion_tokens} tokens`);
+    if (msg.usage && msg.durationMs && msg.ttftMs != null && msg.usage.completion_tokens > 1) {
+      const rate = (msg.usage.completion_tokens - 1) / Math.max(0.001, (msg.durationMs - msg.ttftMs) / 1000);
+      parts.push(`${rate.toFixed(1)} tokens/s`);
+    }
+    if (msg.ttftMs != null) parts.push(`first token in ${(msg.ttftMs / 1000).toFixed(2)} s`);
+    return parts.join(", ");
+  }
+
+  private copy(text: string): void {
+    const ok = () => this.toast("Copied to clipboard");
+    const fail = () => this.toast("Couldn't copy");
+    if (navigator.clipboard?.writeText) { navigator.clipboard.writeText(text).then(ok, fail); return; }
+    const ta = h("textarea", { class: "sr-only" });
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    try { if (document.execCommand("copy")) ok(); else fail(); } catch { fail(); }
+    ta.remove();
+  }
+
+  private scrollToEnd(force = false, smooth = false): void {
+    const t = this.els.thread;
+    if (!force && !this.stickToBottom) return;
+    t.scrollTo({ top: t.scrollHeight, behavior: smooth && !reducedMotion.matches ? "smooth" : "auto" });
+    this.stickToBottom = true;
   }
 
   private queueStreamRender(): void {
@@ -258,38 +653,41 @@ class ChatApp {
     this.renderQueued = true;
     requestAnimationFrame(() => {
       this.renderQueued = false;
-      if (!this.streamingMsg || !this.streamingNode) return;
-      const body = this.streamingNode.querySelector(".msg-body");
-      if (body) body.replaceChildren(renderMarkdown(this.streamingMsg.content));
+      const msg = this.streamingMsg, node = this.streamingNode;
+      if (!msg || !node) return;
+      const body = node.querySelector<HTMLElement>(".prose");
+      if (body) {
+        body.replaceChildren(renderMarkdown(msg.content));
+        appendCaret(body);
+      }
       this.scrollToEnd();
-      this.updateStatus();
     });
   }
 
+  // ---------- composer ----------
+
   private setState(state: GenState): void {
     this.state = state;
-    const busy = state === "connecting" || state === "streaming";
+    const busy = state !== "idle";
     this.els.send.hidden = busy;
     this.els.stop.hidden = !busy;
-    this.els.input.disabled = false;
-    this.updateStatus();
+    this.els.app.classList.toggle("is-busy", busy);
+    this.updateComposer();
   }
 
-  private updateStatus(): void {
-    const s = this.els.status;
-    if (this.state === "connecting") s.textContent = "Waiting for the model…";
-    else if (this.state === "streaming") {
-      const secs = (performance.now() - this.streamStarted) / 1000;
-      s.textContent = `Generating · ~${this.streamChunks} tokens · ${secs.toFixed(1)} s`;
-    } else if (this.state === "error") s.textContent = "Last request failed.";
-    else s.textContent = "";
+  private updateComposer(): void {
+    const hasText = this.els.input.value.trim().length > 0;
+    this.els.send.disabled = !hasText || this.connected !== "ok";
+    this.els.hint.textContent = this.state === "connecting" ? "Waiting for the model…" : this.state === "streaming" ? "Writing…" : "";
   }
 
   private autosize(): void {
     const t = this.els.input;
     t.style.height = "auto";
-    t.style.height = `${Math.min(t.scrollHeight, 240)}px`;
+    t.style.height = `${Math.min(t.scrollHeight, narrow.matches ? 168 : 280)}px`;
   }
+
+  // ---------- generation ----------
 
   private history(conv: Conversation, upTo: number): ChatMessage[] {
     const out: ChatMessage[] = [];
@@ -303,22 +701,33 @@ class ChatApp {
 
   private send(): void {
     const text = this.els.input.value.trim();
-    if (!text || !this.current || this.state === "streaming" || this.state === "connecting") return;
+    if (!text || !this.current || this.state !== "idle") return;
     if (!this.els.model.value) {
-      this.showBanner("No model is available. Check the connection and Settings.");
+      this.showBanner("No model is available yet.", "Retry", () => this.refreshModels());
       return;
     }
     this.els.input.value = "";
     this.autosize();
     this.current.messages.push({ id: uid(), role: "user", content: text, status: "done", createdAt: Date.now() });
     this.store.touch(this.current);
-    this.renderList();
+    this.updateTitle();
+    this.generate();
+  }
+
+  private submitEdit(index: number, value: string): void {
+    const conv = this.current;
+    const text = value.trim();
+    if (!conv || !text || this.state !== "idle") return;
+    conv.messages = conv.messages.slice(0, index + 1);
+    conv.messages[index] = { ...conv.messages[index], content: text, createdAt: Date.now() };
+    this.editingId = null;
+    this.store.touch(conv);
     this.generate();
   }
 
   private regenerate(): void {
     const conv = this.current;
-    if (!conv || this.state === "streaming" || this.state === "connecting") return;
+    if (!conv || this.state !== "idle") return;
     const last = conv.messages[conv.messages.length - 1];
     if (last?.role === "assistant") conv.messages.pop();
     if (!conv.messages.length || conv.messages[conv.messages.length - 1].role !== "user") return;
@@ -333,31 +742,24 @@ class ChatApp {
     const conv = this.current!;
     const model = this.els.model.value;
     const messages = this.history(conv, conv.messages.length);
-    const msg: StoredMessage = {
-      id: uid(), role: "assistant", content: "", status: "streaming", createdAt: Date.now(), model,
-    };
+    const limit = this.modelLimit();
+    const maxTokens = limit ? Math.min(this.settings.maxTokens, limit) : this.settings.maxTokens;
+    const msg: StoredMessage = { id: uid(), role: "assistant", content: "", status: "streaming", createdAt: Date.now(), model };
     conv.messages.push(msg);
     this.streamingMsg = msg;
-    this.streamChunks = 0;
-    this.streamStarted = performance.now();
-    this.renderMessages();
-
-    const controller = new AbortController();
-    this.controller = controller;
+    this.controller = new AbortController();
     this.setState("connecting");
+    this.renderMessages(true);
+    this.renderList();
 
     try {
       const result = await this.client.streamChat(
-        { model, messages, temperature: this.settings.temperature, max_tokens: this.settings.maxTokens },
+        { model, messages, temperature: this.settings.temperature, max_tokens: maxTokens },
         {
           onOpen: () => this.setState("streaming"),
-          onDelta: (delta) => {
-            msg.content += delta;
-            this.streamChunks++;
-            this.queueStreamRender();
-          },
+          onDelta: (delta) => { msg.content += delta; this.queueStreamRender(); },
         },
-        controller.signal,
+        this.controller.signal,
       );
       msg.content = result.text;
       msg.status = "done";
@@ -365,73 +767,100 @@ class ChatApp {
       msg.finishReason = result.finishReason;
       msg.ttftMs = result.firstTokenMs;
       msg.durationMs = result.durationMs;
-      this.finish(conv, "idle");
     } catch (err) {
       if (err instanceof AbortedError) {
         msg.status = msg.content ? "stopped" : "error";
-        if (!msg.content) msg.error = "stopped before any output";
-        this.finish(conv, "idle");
+        if (!msg.content) msg.error = "Stopped before the model replied.";
       } else {
         msg.status = "error";
         msg.error = describeError(err);
-        this.finish(conv, "error");
-        if (err instanceof NetworkError && !navigator.onLine) this.showBanner("You are offline.");
-        if (err instanceof ApiError && err.status === 401) this.showBanner("Invalid or missing API key. Open Settings.");
+        if (err instanceof ApiError && err.status === 401) {
+          this.showBanner("This server needs an API key.", "Add key", () => this.openSettings("set-api-key"));
+        }
       }
+    } finally {
+      this.controller = null;
+      this.streamingMsg = null;
+      this.store.touch(conv);
+      this.setState("idle");
+      if (conv === this.current) this.renderMessages();
+      this.renderList();
+      this.updateTitle();
     }
   }
 
-  private finish(conv: Conversation, state: GenState): void {
-    this.controller = null;
-    this.streamingMsg = null;
-    this.store.touch(conv);
-    this.setState(state);
-    if (conv === this.current) this.renderMessages();
-    this.renderList();
-  }
+  // ---------- settings ----------
 
-  private openSettings(): void {
-    const f = (id: string) => $(id) as HTMLInputElement;
+  private openSettings(focusId?: string): void {
+    const f = (id: string) => $<HTMLInputElement>(id);
     f("set-base-url").value = this.settings.baseUrl;
     f("set-api-key").value = loadApiKey();
     f("set-remember").checked = this.settings.rememberKey;
     f("set-temperature").value = String(this.settings.temperature);
-    f("set-max-tokens").value = String(this.settings.maxTokens);
-    ($("set-system") as HTMLTextAreaElement).value = this.settings.systemPrompt;
-    this.els.dialog.showModal();
+    const tokens = f("set-max-tokens");
+    const limit = this.modelLimit() ?? 1024;
+    tokens.max = String(limit);
+    tokens.value = String(Math.min(this.settings.maxTokens, limit));
+    $<HTMLTextAreaElement>("set-system").value = this.settings.systemPrompt;
+    for (const r of document.querySelectorAll<HTMLInputElement>('input[name="theme"]')) r.checked = r.value === this.settings.theme;
+    this.syncOutputs();
+    if (this.isSidebarOverlayOpen()) this.toggleSidebar(false);
+    this.els.settings.showModal();
+    if (focusId) f(focusId).focus();
+  }
+
+  private syncOutputs(): void {
+    $("temp-out").textContent = Number($<HTMLInputElement>("set-temperature").value).toFixed(1);
+    $("tokens-out").textContent = $<HTMLInputElement>("set-max-tokens").value;
   }
 
   private saveSettingsFromDialog(): void {
-    const f = (id: string) => $(id) as HTMLInputElement;
+    const f = (id: string) => $<HTMLInputElement>(id);
     const temperature = Number(f("set-temperature").value);
     const maxTokens = Math.floor(Number(f("set-max-tokens").value));
+    const theme = (document.querySelector<HTMLInputElement>('input[name="theme"]:checked')?.value ?? "system") as Theme;
+    const oldBase = this.settings.baseUrl;
+    const oldKey = loadApiKey();
     this.settings = {
       ...this.settings,
       baseUrl: f("set-base-url").value.trim(),
       rememberKey: f("set-remember").checked,
       temperature: Number.isFinite(temperature) ? Math.min(2, Math.max(0, temperature)) : this.settings.temperature,
       maxTokens: Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : this.settings.maxTokens,
-      systemPrompt: ($("set-system") as HTMLTextAreaElement).value,
+      systemPrompt: $<HTMLTextAreaElement>("set-system").value,
+      theme,
     };
     saveSettings(this.settings);
     const key = f("set-api-key").value.trim();
     saveApiKey(key, this.settings.rememberKey);
     this.client.configure({ baseUrl: this.settings.baseUrl, apiKey: key });
-    this.els.dialog.close();
-    this.refreshModels();
+    this.applyTheme();
+    this.els.settings.close();
+    if (oldBase !== this.settings.baseUrl || oldKey !== key || this.connected !== "ok") this.refreshModels();
+    this.toast("Settings saved");
   }
+}
+
+const CARET_HOSTS = new Set(["P", "UL", "OL", "LI", "BLOCKQUOTE", "H1", "H2", "H3", "H4", "H5", "H6"]);
+
+function appendCaret(root: HTMLElement): void {
+  let target: Element = root;
+  while (target.lastElementChild && CARET_HOSTS.has(target.lastElementChild.tagName)) target = target.lastElementChild;
+  target.appendChild(h("span", { class: "caret", "aria-hidden": "true" }));
 }
 
 function describeError(err: unknown): string {
   if (err instanceof ApiError) {
-    if (err.status === 429) return `Rate limited: ${err.message}`;
-    if (err.status === 503) return `Server busy: ${err.message}`;
+    if (err.status === 429) return "You're sending messages too quickly. Wait a moment, then try again.";
+    if (err.status === 503) return "The server is busy right now. Try again in a few seconds.";
+    if (err.code === "context_length_exceeded") return "This chat is too long for the model. Start a new chat to continue.";
+    if (err.status === 401) return "The server rejected the API key. Check it in Settings.";
     return err.requestId ? `${err.message} (request ${err.requestId})` : err.message;
   }
   if (err instanceof NetworkError) {
-    return err.partial ? "Connection lost mid-response. Retry to regenerate." : "Could not reach the server.";
+    return err.partial ? "The connection dropped mid-reply. Try again to regenerate it." : "Can't reach the server. Check your connection and try again.";
   }
-  return "Unexpected error.";
+  return "Something went wrong while generating the reply.";
 }
 
 new ChatApp().start();

@@ -28,14 +28,14 @@ limits:
 
 security:
   api_keys_env: PTF_API_KEYS   # set PTF_API_KEYS in the host's dashboard (min 16 chars)
-  allow_unauthenticated: false
+  allow_unauthenticated: true  # public visitors can chat with no key; keys still work
   metrics_require_auth: true
   cors_origins: []             # add e.g. "https://chat.yourdomain.com" only if a separate site calls the API
-  trust_forwarded_for: false
+  trust_forwarded_for: true    # Render's proxy sends the visitor IP; needed for per-visitor limits
   rate_limit:
-    requests_per_minute: 60
-    burst: 20
-    max_concurrent_per_principal: 4
+    requests_per_minute: 20      # per visitor (per IP) or per key
+    burst: 10
+    max_concurrent_per_principal: 2
 
 runtime:
   device: cpu

@@ -2,46 +2,175 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>PyTensorForge Chat</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#F7F8F8" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#17191C" media="(prefers-color-scheme: dark)">
+  <meta name="color-scheme" content="light dark">
+  <title>Zyven</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preload" href="fonts/geist.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="styles.css">
   <script type="module" src="app.js"></script>
 </head>
 <body>
-  <div class="layout">
-    <aside class="sidebar">
-      <button id="new-chat" type="button" class="primary">New chat</button>
-      <ul id="conversations" class="conversations" aria-label="Conversations"></ul>
+  <div class="app" id="app">
+    <aside class="sidebar" id="sidebar" aria-label="Chats">
+      <div class="sidebar-head">
+        <a class="brand" href="./" aria-label="Zyven home">
+          <span class="brand-mark" data-icon="mark"></span>
+          <span class="brand-name">Zyven</span>
+        </a>
+        <button class="icon-btn" id="collapse-btn" type="button" aria-label="Close sidebar" title="Close sidebar (Ctrl+B)" data-icon="sidebar"></button>
+      </div>
+
+      <div class="sidebar-actions">
+        <button class="nav-btn nav-btn-primary" id="new-chat" type="button" title="New chat (Ctrl+Shift+O)">
+          <span data-icon="plus"></span><span>New chat</span>
+        </button>
+        <label class="search">
+          <span data-icon="search"></span>
+          <input id="search" type="search" placeholder="Search chats" aria-label="Search chats" autocomplete="off" enterkeyhint="search">
+        </label>
+      </div>
+
+      <nav class="history" id="history" aria-label="Chat history"></nav>
+
+      <div class="sidebar-foot">
+        <button class="nav-btn" id="settings-btn" type="button">
+          <span data-icon="settings"></span><span>Settings</span>
+        </button>
+      </div>
     </aside>
+    <div class="scrim" id="scrim" hidden></div>
+
     <main class="main">
       <header class="topbar">
-        <label class="model-picker">Model <select id="model" aria-label="Model"></select></label>
-        <span id="conn-status" class="conn conn-pending">connecting…</span>
-        <button id="settings-btn" type="button">Settings</button>
-      </header>
-      <div id="banner" class="banner" role="status" hidden></div>
-      <section id="messages" class="messages" aria-live="polite"></section>
-      <footer class="composer">
-        <div id="status-line" class="status-line" aria-live="polite"></div>
-        <div class="composer-row">
-          <textarea id="input" rows="1" placeholder="Send a message (Enter to send, Shift+Enter for a newline)" aria-label="Message"></textarea>
-          <button id="send" type="button" class="primary">Send</button>
-          <button id="stop" type="button" class="danger" hidden>Stop</button>
+        <button class="icon-btn" id="open-sidebar" type="button" aria-label="Open sidebar" title="Open sidebar (Ctrl+B)" data-icon="sidebar"></button>
+        <h1 class="topbar-title" id="chat-title">New chat</h1>
+        <div class="topbar-end">
+          <button class="icon-btn" id="chat-menu-btn" type="button" aria-label="Chat options" aria-haspopup="menu" data-icon="more"></button>
+          <button class="icon-btn mobile-only" id="new-chat-top" type="button" aria-label="New chat" data-icon="compose"></button>
         </div>
-      </footer>
+      </header>
+
+      <div class="thread" id="thread">
+        <div class="thread-inner">
+          <section class="welcome" id="welcome" hidden>
+            <span class="welcome-mark" data-icon="mark"></span>
+            <h2 class="welcome-title" id="welcome-title">Good to see you</h2>
+            <p class="welcome-sub">Ask for a story, an idea, or a quick explanation.</p>
+          </section>
+          <div class="messages" id="messages" role="log" aria-live="polite" aria-relevant="additions"></div>
+        </div>
+      </div>
+
+      <div class="dock" id="dock">
+        <button class="jump" id="jump" type="button" aria-label="Scroll to latest message" data-icon="arrow-down" hidden></button>
+        <div class="banner" id="banner" role="status" hidden>
+          <span data-icon="alert"></span>
+          <span class="banner-text" id="banner-text"></span>
+          <button class="link-btn" id="banner-action" type="button" hidden></button>
+        </div>
+
+        <div class="composer" id="composer">
+          <label class="sr-only" for="input">Message Zyven</label>
+          <textarea id="input" rows="1" placeholder="Message Zyven" enterkeyhint="send" autocomplete="off"></textarea>
+          <div class="composer-bar">
+            <label class="model-picker" title="Model">
+              <span class="conn-dot" id="conn-dot" data-state="pending"></span>
+              <select id="model" aria-label="Model"></select>
+              <span data-icon="chevron"></span>
+            </label>
+            <span class="composer-hint" id="composer-hint"></span>
+            <button class="send-btn" id="send" type="button" aria-label="Send message" data-icon="arrow-up" disabled></button>
+            <button class="send-btn stop-btn" id="stop" type="button" aria-label="Stop generating" data-icon="stop" hidden></button>
+          </div>
+        </div>
+
+        <div class="suggestions" id="suggestions" hidden></div>
+        <p class="footnote">Zyven is a small experimental model and can make mistakes.</p>
+      </div>
     </main>
   </div>
-  <dialog id="settings" aria-label="Settings">
-    <h2>Settings</h2>
-    <label>Server URL <input id="set-base-url" type="url" placeholder="same origin"></label>
-    <label>API key <input id="set-api-key" type="password" autocomplete="off"></label>
-    <label class="check"><input id="set-remember" type="checkbox"> Remember key on this device</label>
-    <label>Temperature <input id="set-temperature" type="number" min="0" max="2" step="0.1"></label>
-    <label>Max tokens <input id="set-max-tokens" type="number" min="1" step="1"></label>
-    <label>System prompt <textarea id="set-system" rows="3"></textarea></label>
+
+  <div class="menu" id="menu" role="menu" hidden></div>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <dialog class="dialog" id="confirm" aria-labelledby="confirm-title">
+    <div class="dialog-body">
+      <h2 class="dialog-title" id="confirm-title">Delete chat?</h2>
+      <p class="dialog-text" id="confirm-text"></p>
+    </div>
     <div class="dialog-actions">
-      <button id="settings-cancel" type="button">Cancel</button>
-      <button id="settings-save" type="button" class="primary">Save</button>
+      <button class="btn" id="confirm-cancel" type="button">Cancel</button>
+      <button class="btn btn-danger" id="confirm-ok" type="button">Delete</button>
+    </div>
+  </dialog>
+
+  <dialog class="dialog dialog-wide" id="settings" aria-labelledby="settings-title">
+    <div class="dialog-head">
+      <h2 class="dialog-title" id="settings-title">Settings</h2>
+      <button class="icon-btn" id="settings-close" type="button" aria-label="Close settings" data-icon="close"></button>
+    </div>
+    <div class="dialog-scroll">
+      <section class="field-group" aria-labelledby="sg-appearance">
+        <h3 class="group-title" id="sg-appearance">Appearance</h3>
+        <div class="segmented" role="radiogroup" aria-label="Theme">
+          <label><input type="radio" name="theme" value="system"><span>System</span></label>
+          <label><input type="radio" name="theme" value="light"><span>Light</span></label>
+          <label><input type="radio" name="theme" value="dark"><span>Dark</span></label>
+        </div>
+      </section>
+
+      <section class="field-group" aria-labelledby="sg-response">
+        <h3 class="group-title" id="sg-response">Responses</h3>
+        <label class="field">
+          <span class="field-label">Instructions</span>
+          <span class="field-help">Sent before every chat, for example a tone or a role for the model to play.</span>
+          <textarea id="set-system" rows="3" placeholder="Optional"></textarea>
+        </label>
+        <label class="field">
+          <span class="field-row"><span class="field-label">Creativity</span><output id="temp-out" for="set-temperature"></output></span>
+          <span class="field-help">Lower is more predictable, higher is more varied.</span>
+          <input id="set-temperature" type="range" min="0" max="2" step="0.1">
+        </label>
+        <label class="field">
+          <span class="field-row"><span class="field-label">Maximum reply length</span><output id="tokens-out" for="set-max-tokens"></output></span>
+          <span class="field-help">In tokens. Capped by the server's limit.</span>
+          <input id="set-max-tokens" type="range" min="16" max="256" step="16">
+        </label>
+      </section>
+
+      <section class="field-group" aria-labelledby="sg-connection">
+        <h3 class="group-title" id="sg-connection">Connection</h3>
+        <label class="field">
+          <span class="field-label">API key</span>
+          <span class="field-help">Only needed if the server requires one. Leave empty for public access.</span>
+          <input id="set-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="Not set">
+        </label>
+        <label class="check">
+          <input id="set-remember" type="checkbox">
+          <span>Remember the key on this device</span>
+        </label>
+        <label class="field">
+          <span class="field-label">Server URL</span>
+          <span class="field-help">Leave empty to use this site.</span>
+          <input id="set-base-url" type="url" inputmode="url" spellcheck="false" placeholder="This site">
+        </label>
+      </section>
+
+      <section class="field-group" aria-labelledby="sg-data">
+        <h3 class="group-title" id="sg-data">Data</h3>
+        <div class="field-row field-row-action">
+          <span class="field-help">Chats are stored only in this browser.</span>
+          <button class="btn btn-danger-ghost" id="clear-all" type="button">Delete all chats</button>
+        </div>
+        <p class="field-help shortcuts">Shortcuts: <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>O</kbd> new chat, <kbd>Ctrl</kbd> <kbd>K</kbd> search, <kbd>Ctrl</kbd> <kbd>B</kbd> sidebar, <kbd>Esc</kbd> stop.</p>
+      </section>
+    </div>
+    <div class="dialog-actions">
+      <button class="btn" id="settings-cancel" type="button">Cancel</button>
+      <button class="btn btn-primary" id="settings-save" type="button">Save</button>
     </div>
   </dialog>
 </body>

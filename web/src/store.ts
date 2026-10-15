@@ -23,6 +23,7 @@ export interface Conversation {
   createdAt: number;
   updatedAt: number;
   model?: string;
+  renamed?: boolean;
   messages: StoredMessage[];
 }
 
@@ -33,7 +34,11 @@ export interface Settings {
   maxTokens: number;
   systemPrompt: string;
   rememberKey: boolean;
+  theme: Theme;
+  sidebarCollapsed: boolean;
 }
+
+export type Theme = "system" | "light" | "dark";
 
 const CONV_KEY = "ptf-chat:conversations:v1";
 const SETTINGS_KEY = "ptf-chat:settings:v1";
@@ -47,6 +52,8 @@ export const DEFAULT_SETTINGS: Settings = {
   maxTokens: 512,
   systemPrompt: "",
   rememberKey: false,
+  theme: "system",
+  sidebarCollapsed: false,
 };
 
 export function uid(): string {
@@ -103,9 +110,22 @@ export class ConversationStore {
     this.save(true);
   }
 
+  rename(id: string, title: string): void {
+    const conv = this.get(id);
+    if (!conv) return;
+    conv.title = title.trim().slice(0, 80) || conv.title;
+    conv.renamed = true;
+    this.save();
+  }
+
+  clear(): void {
+    this.conversations = [];
+    this.save(true);
+  }
+
   touch(conv: Conversation): void {
     conv.updatedAt = Date.now();
-    if (conv.title === "New chat") {
+    if (conv.title === "New chat" && !conv.renamed) {
       const first = conv.messages.find((m) => m.role === "user");
       if (first) conv.title = first.content.trim().replace(/\s+/g, " ").slice(0, 60) || "New chat";
     }

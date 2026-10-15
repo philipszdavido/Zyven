@@ -28,7 +28,7 @@ If it is far slower, lower `d_model`/`n_layers` or `total_steps`.
 ## 4. Pretrain (long; resumable)
     caffeinate -i python cli.py train configs/pretrain-general.yaml --device mps --duty-cycle 0.7
 Stop any time with Ctrl-C; continue with:
-    caffeinate -i python cli.py resume checkpoints-general/checkpoint_latest.ptf --config configs/pretrain-general.yaml --device mps --duty-cycle 0.7
+    caffeinate -i python cli.py resume checkpoints-general/checkpoint_latest.ptf --config chat-gpt-config/configs/pretrain-general.yaml --device mps --duty-cycle 0.7
 Loss starts near 9.7 (ln 16384). Read the `eval` lines: they should keep falling. I expect it to settle somewhere around
 3.5-4.5 (a guess), which is a fluent-but-shallow model.
 
