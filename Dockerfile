@@ -5,13 +5,10 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# The project's only runtime dependencies are numpy and pyyaml.
-RUN pip install --no-cache-dir numpy pyyaml
+# pytensorforge brings numpy and pyyaml with it. Pin the version you published.
+RUN pip install --no-cache-dir "pytensorforge==0.2.0"
 
-# Run from /app (not pip-installed): the server finds the web UI at ./web/dist
 COPY cli.py ./
-COPY src ./src
-COPY web/dist ./web/dist
 COPY serve.yaml ./serve.yaml
 COPY start.sh ./start.sh
 COPY scripts/fetch_model.py ./scripts/fetch_model.py
