@@ -1,3 +1,5 @@
+# Stage 2: turn the pretrained model into a chat model.
+# The model: section must match pretrain.yaml exactly.
 model:
   vocab_size: 8192
   context_length: 256
@@ -31,4 +33,4 @@ evaluation:
   interval_steps: 250
   max_batches: 25
 runtime:
-  device: cuda
+  device: auto               # CUDA if present, else the Apple GPU (mps), else the CPU
